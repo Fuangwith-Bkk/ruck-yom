@@ -1,0 +1,52 @@
+import WebSocket from 'ws';
+import { TUYA_PASULAR_ENV, TuyaRegionConfigEnum } from './config';
+type LoggerLevel = 'INFO' | 'ERROR';
+interface IConfig {
+    accessId: string;
+    accessKey: string;
+    env: TUYA_PASULAR_ENV;
+    url: TuyaRegionConfigEnum;
+    timeout?: number;
+    maxRetryTimes?: number;
+    retryTimeout?: number;
+    logger?: (level: LoggerLevel, ...args: any) => void;
+}
+declare class TuyaMessageSubscribeWebsocket {
+    static URL: typeof TuyaRegionConfigEnum;
+    static env: typeof TUYA_PASULAR_ENV;
+    static data: string;
+    static error: string;
+    static open: string;
+    static close: string;
+    static reconnect: string;
+    static ping: string;
+    static pong: string;
+    private config;
+    private server?;
+    private timer;
+    private retryTimes;
+    private event;
+    constructor(config: IConfig);
+    start(): void;
+    open(cb: (ws: WebSocket) => void): void;
+    message(cb: (ws: WebSocket, message: any) => void): void;
+    ping(cb: (ws: WebSocket) => void): void;
+    pong(cb: (ws: WebSocket) => void): void;
+    reconnect(cb: (ws: WebSocket) => void): void;
+    ackMessage(messageId: string): void;
+    error(cb: (ws: WebSocket, error: any) => void): void;
+    close(cb: (ws: WebSocket) => void): void;
+    private _reconnect;
+    private _connect;
+    private subOpen;
+    private subPing;
+    private subPong;
+    private subMessage;
+    private subClose;
+    private subError;
+    private clearKeepAlive;
+    private keepAlive;
+    private handleMessage;
+    private logger;
+}
+export default TuyaMessageSubscribeWebsocket;

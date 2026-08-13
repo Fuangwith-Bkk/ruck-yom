@@ -1,0 +1,23 @@
+# Secret Files
+.env
+.env.local
+.env.production.local
+!.env.example
+
+# Device registry (contains real Tuya device IDs)
+src/config/deviceRegistry.json
+!src/config/deviceRegistry.example.json
+
+# Dependencies
+node_modules/
+
+# OS & Editor Assets
+.DS_Store
+.vscode/
+.idea/
+.claude/
+*.log
+
+# Temp Files
+npm-debug.log*
+yarn-debug.log*
