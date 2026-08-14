@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [1.2.0] - 2026-08-14
+
+### Added
+- **Rotating file logger** (`src/utils/logger.js`). All app-level `console.log`/`console.error` calls, plus the Tuya SDK's own per-message `INFO` logging (previously unbounded raw `console.log` dumps, one per Pulsar message — the dominant source of log volume), now route through it. Writes to both the console (so `pm2 logs` still works) and a rotating file under `LOG_DIR`.
+- `LOG_DIR`, `LOG_MAX_SIZE` (default `10M`), `LOG_MAX_FILES` (default `7`) env vars. Rotation triggers daily or at `LOG_MAX_SIZE`, whichever comes first; on each rotation, only the `LOG_MAX_FILES` most recently modified rotated files are kept, bounding worst-case disk usage to roughly `LOG_MAX_SIZE × LOG_MAX_FILES` regardless of log volume — addresses a real disk-fill risk on the Oracle Cloud production VM.
+- `switch` DP code now recognized as door contact state (`DOOR_OPENED`/`DOOR_CLOSED`), same `true = open` polarity as `doorcontact_state`. Previously fell through to `UNKNOWN_EVENT`. Confirmed against a real production device (`ประตูห้องพ่อ`) by cross-referencing Pulsar events against the Smart Life app's History log — every open/close pair matched exactly. Distinct from `switch_1`, which remains relay/light semantics.
+
+### Note
+- Not addressed by this release: pm2's own log capture (`~/.pm2/logs/`) mirrors all stdout/stderr independently of this app's logger and is **not** bounded by `LOG_MAX_FILES`. Fully closing the disk-fill risk on the VM also requires `pm2 install pm2-logrotate` once — a pm2-level operational step, not something `.env` controls.
+
 ## [1.1.0] - 2026-08-14
 
 ### Added

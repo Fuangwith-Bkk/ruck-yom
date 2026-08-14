@@ -1,3 +1,5 @@
+const logger = require('../utils/logger');
+
 // Short, timestamp-free clause per eventType — used to build one line of a
 // CHAIN_ESCALATION message. Every eventType the normalizer can emit needs an
 // entry here, since any of them can now land inside a consolidated window.
@@ -40,7 +42,7 @@ class EventCorrelator {
 
     if (this.openWindow) {
       this.openWindow.events.push(event);
-      console.log(`[CORRELATOR] Buffered (${eventType}) into open window`);
+      logger.info(`[CORRELATOR] Buffered (${eventType}) into open window`);
       if (eventType === TERMINAL_EVENT) {
         await this._flush();
       }
@@ -56,7 +58,7 @@ class EventCorrelator {
     this.openWindow = {
       events: [],
       timer: setTimeout(() => {
-        this._flush().catch((err) => console.error('[CORRELATOR] Flush failed:', err));
+        this._flush().catch((err) => logger.error('[CORRELATOR] Flush failed:', err));
       }, windowMs())
     };
   }
@@ -96,7 +98,7 @@ class EventCorrelator {
   async _push(event) {
     const text = this.templateEngine.render(event);
     await this.lineService.pushMessage(text);
-    console.log(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
+    logger.info(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
   }
 }
 

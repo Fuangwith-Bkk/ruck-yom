@@ -37,6 +37,24 @@ class SensorNormalizer {
         continue;
       }
 
+      // Some door/window sensors (Tuya's "qt"/Others category) report
+      // contact state under the generic `switch` code instead of
+      // `doorcontact_state`, with the same true=open polarity — confirmed
+      // 2026-08-14 against a real device (ประตูห้องพ่อ) by cross-referencing
+      // production events against the Smart Life app's History log.
+      // Distinct from `switch_1` below, which is a relay/light, not a door.
+      if (code === 'switch') {
+        const isOpened = value === true || value === 'true';
+        events.push({
+          deviceId,
+          deviceName,
+          eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
+          timestamp,
+          time
+        });
+        continue;
+      }
+
       if (code === 'pir') {
         const isMotion = value === 'pir' || value === true || value === 'true';
         // Only the motion-detected transition is alert-worthy (Section 9 DoD).

@@ -168,6 +168,11 @@ LINE_BOT_NAME=รักยม                            # Used as {{botName}} i
 # Event Consolidation
 EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidation window (ms). Optional, defaults to 15000.
 
+# Logging (rotating file, in addition to console/pm2 output)
+LOG_DIR=./logs                                 # Optional, defaults to ./logs
+LOG_MAX_SIZE=10M                               # Rotate when the active log file hits this size. Optional, defaults to 10M.
+LOG_MAX_FILES=7                                # Keep only the N most recent rotated files. Optional, defaults to 7.
+
 ```
 
 Vars marked "Unused until Phase X" are still declared now (and validated as optional) so the schema is stable across phases, but Section 8.2's `REQUIRED_ENV` list should only enforce the ones Phase 1 actually needs — see below.
@@ -210,7 +215,8 @@ ruck-yom/
 │   │   ├── securityAlerts.json     # Localized Thai message templates
 │   │   └── statusReports.json      # Status layout templates (Phase 2 placeholder)
 │   ├── utils/
-│   │   └── dateTime.js             # Asia/Bangkok date-time formatter
+│   │   ├── dateTime.js             # Asia/Bangkok date-time formatter
+│   │   └── logger.js               # Console + size/day-rotated file logger, bounded by LOG_MAX_FILES
 │   └── app.js                      # Application bootstrap & event loop
 └── tuya-pulsar-ws-node/            # Compiled local Pulsar SDK package
     ├── dist/                       # Compiled JavaScript output
@@ -225,8 +231,8 @@ ruck-yom/
 
 | Device Category | Tuya DP Code (`code`) | Payload Value (`value`) | Event Key (`eventType`) | Default Thai Event Text |
 | --- | --- | --- | --- | --- |
-| **Door Contact Sensor** | `doorcontact_state` | `true` | `DOOR_OPENED` | 🚪 เปิดประตูแล้ว |
-|  | `doorcontact_state` | `false` | `DOOR_CLOSED` | 🚪 ปิดประตูแล้ว |
+| **Door Contact Sensor** | `doorcontact_state` or `switch` | `true` | `DOOR_OPENED` | 🚪 เปิดประตูแล้ว |
+|  | `doorcontact_state` or `switch` | `false` | `DOOR_CLOSED` | 🚪 ปิดประตูแล้ว |
 | **PIR Motion Sensor** | `pir` | `"pir"` / `true` | `MOTION_DETECTED` | 🏃 ตรวจพบการเคลื่อนไหว |
 | **Water Leak Sensor** | `watersensor_state` | `"alarm"` / `true` | `WATER_LEAK` | 💦 ตรวจพบน้ำรั่วซึม |
 | **Battery Level** | `battery_percentage` or `battery` | `number` (0–100) | `BATTERY_LOW` | ⚠️ แบตเตอรี่ต่ำ (< 20%) |
@@ -237,6 +243,8 @@ ruck-yom/
 Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), water sensor `"normal"`, battery ≥ 20%, and `alarm_switch` = `false` (no sample wording exists yet for an alarm being silenced) — is intentionally **not** mapped to an event and produces no LINE message (see Section 9 DoD). `sensorNormalizer.transform()` returns `null` for these rather than an `UNKNOWN_EVENT`.
 
 Some devices report battery under DP code `battery` instead of `battery_percentage` (observed in production on a door sensor) — `sensorNormalizer.js` treats both codes identically, same `<20%` threshold. Before this alias was added, `battery` fell through to `UNKNOWN_EVENT` and spammed the group on every routine reading, including healthy ones.
+
+The same door sensor also reports contact state under DP code `switch` instead of `doorcontact_state`, same `true = open` polarity — confirmed by cross-referencing production events against the Smart Life app's History log (see `TUYA_DEVICE_DP_REGISTRY.md`, `qt` category). `switch` is distinct from `switch_1` (relay/light control, Section 6 table above) — same code name pattern as the `battery`/`battery_percentage` aliasing, different DP.
 
 Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside the full `timestamp` (`DD/MM/YY HH:MM:ss`) — `time` is only used by the Event Correlator (Section 8.8) for the per-line stamps inside a consolidated chain message; every standalone message still renders the full `timestamp`.
 
@@ -277,7 +285,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ```json
 {
   "name": "ruck-yom",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -287,7 +295,8 @@ Voice: `รักยม` is written as a small child assigned to watch the house
   "dependencies": {
     "@line/bot-sdk": "^11.1.0",
     "dotenv": "^16.4.5",
-    "lru-cache": "^10.2.0"
+    "lru-cache": "^10.2.0",
+    "rotating-file-stream": "^3.2.10"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -424,6 +433,24 @@ class SensorNormalizer {
       const { code, value } = dp;
 
       if (code === 'doorcontact_state') {
+        const isOpened = value === true || value === 'true';
+        events.push({
+          deviceId,
+          deviceName,
+          eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
+          timestamp,
+          time
+        });
+        continue;
+      }
+
+      // Some door/window sensors (Tuya's "qt"/Others category) report
+      // contact state under the generic `switch` code instead of
+      // `doorcontact_state`, with the same true=open polarity — confirmed
+      // 2026-08-14 against a real device (ประตูห้องพ่อ) by cross-referencing
+      // production events against the Smart Life app's History log.
+      // Distinct from `switch_1` below, which is a relay/light, not a door.
+      if (code === 'switch') {
         const isOpened = value === true || value === 'true';
         events.push({
           deviceId,
@@ -625,6 +652,8 @@ being wrapped in a single-line `CHAIN_ESCALATION` — consolidation only
 kicks in once there's actually more than one thing to summarize.
 
 ```javascript
+const logger = require('../utils/logger');
+
 // Short, timestamp-free clause per eventType — used to build one line of a
 // CHAIN_ESCALATION message. Every eventType the normalizer can emit needs an
 // entry here, since any of them can now land inside a consolidated window.
@@ -667,7 +696,7 @@ class EventCorrelator {
 
     if (this.openWindow) {
       this.openWindow.events.push(event);
-      console.log(`[CORRELATOR] Buffered (${eventType}) into open window`);
+      logger.info(`[CORRELATOR] Buffered (${eventType}) into open window`);
       if (eventType === TERMINAL_EVENT) {
         await this._flush();
       }
@@ -683,7 +712,7 @@ class EventCorrelator {
     this.openWindow = {
       events: [],
       timer: setTimeout(() => {
-        this._flush().catch((err) => console.error('[CORRELATOR] Flush failed:', err));
+        this._flush().catch((err) => logger.error('[CORRELATOR] Flush failed:', err));
       }, windowMs())
     };
   }
@@ -723,7 +752,7 @@ class EventCorrelator {
   async _push(event) {
     const text = this.templateEngine.render(event);
     await this.lineService.pushMessage(text);
-    console.log(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
+    logger.info(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
   }
 }
 
@@ -747,6 +776,7 @@ const SensorNormalizer = require('./services/sensorNormalizer');
 const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
+const logger = require('./utils/logger');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
 const normalizer = new SensorNormalizer();
@@ -759,7 +789,11 @@ const client = new TuyaWebsocket({
   accessKey: process.env.TUYA_ACCESS_SECRET,
   url: process.env.TUYA_MQ_URL,
   env: process.env.TUYA_MQ_ENV === 'TEST' ? TuyaWebsocket.env.TEST : TuyaWebsocket.env.PROD,
-  maxRetryTimes: parseInt(process.env.TUYA_PULSAR_MAX_RETRIES, 10) || 50
+  maxRetryTimes: parseInt(process.env.TUYA_PULSAR_MAX_RETRIES, 10) || 50,
+  // The SDK's own per-message INFO logs (raw payload dumps) are the
+  // dominant source of log volume — route them through our rotating
+  // logger too, instead of leaving them as unbounded console.log output.
+  logger: (level, message) => logger.info(`[SDK:${level}]`, message)
 });
 
 // SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example
@@ -773,7 +807,7 @@ client.message(async (ws, message) => {
     // 2. Perform Network Deduplication
     const isDup = await deduplicator.isDuplicate(message.messageId);
     if (isDup) {
-      console.log(`[DEDUPE] Ignored repeat Pulsar messageId: ${message.messageId}`);
+      logger.info(`[DEDUPE] Ignored repeat Pulsar messageId: ${message.messageId}`);
       return;
     }
 
@@ -792,24 +826,124 @@ client.message(async (ws, message) => {
     }
 
   } catch (err) {
-    console.error('[PROCESSING_ERROR] Error handling incoming Pulsar event:', err);
+    logger.error('[PROCESSING_ERROR] Error handling incoming Pulsar event:', err);
   }
 });
 
-client.open(() => console.log('Connected to Tuya Pulsar Message Service.'));
-client.reconnect(() => console.log('Reconnecting to Tuya Pulsar Message Service...'));
+client.open(() => logger.info('Connected to Tuya Pulsar Message Service.'));
+client.reconnect(() => logger.info('Reconnecting to Tuya Pulsar Message Service...'));
 // The SDK's error event has inconsistent arity: connection-level errors
 // (subError) emit (ws, err), but message parse/decrypt failures (subMessage's
 // catch block) emit only (err). Normalize both shapes so the real error is
 // never lost in the `ws` slot.
 client.error((wsOrErr, maybeErr) => {
   const err = maybeErr !== undefined ? maybeErr : wsOrErr;
-  console.error('Tuya Pulsar WebSocket Error:', err);
+  logger.error('Tuya Pulsar WebSocket Error:', err);
 });
 
 client.start();
 
 ```
+
+### 8.10 Rotating Logger (`src/utils/logger.js`)
+
+`console.log`/`console.error` alone are unbounded — under pm2 they get
+captured into `~/.pm2/logs/ruck-yom-*.log` forever, and the Tuya SDK's own
+per-message `INFO` dumps (raw payload text, one per Pulsar message) are the
+dominant source of volume. `logger.js` wraps both console output (so
+`pm2 logs` still works for live tailing) and a size/day-rotated file under
+`LOG_DIR`, pruned to the `LOG_MAX_FILES` most recent rotated files on every
+rotation — bounding worst-case disk usage to roughly
+`LOG_MAX_SIZE × LOG_MAX_FILES` regardless of log volume.
+
+The Tuya SDK (`tuya-pulsar-ws-node`) accepts a `logger` config option
+(`(level, message) => void`, defaulting to `console.log`) — `app.js` passes
+`logger.info` through it (Section 8.9) so the SDK's own noisy per-message
+logs are captured and bounded the same way as the app's own logs, instead of
+being left as raw unbounded `console.log` output.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const rfs = require('rotating-file-stream');
+
+const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, '../../logs');
+const LOG_MAX_SIZE = process.env.LOG_MAX_SIZE || '10M';
+const LOG_MAX_FILES = parseInt(process.env.LOG_MAX_FILES, 10) || 7;
+
+const ACTIVE_FILENAME = 'ruck-yom.log';
+const ROTATED_PATTERN = /^ruck-yom-\d{4}-\d{2}-\d{2}-\d+\.log$/;
+
+fs.mkdirSync(LOG_DIR, { recursive: true });
+
+// Rotate daily or at LOG_MAX_SIZE, whichever comes first. Rotated files get
+// a date+index suffix so pruneOldLogs() can pattern-match and age-sort them
+// independently of the active (unrotated) file.
+function generator(time, index) {
+  if (!time) return ACTIVE_FILENAME;
+  const date = time.toISOString().slice(0, 10);
+  return `ruck-yom-${date}-${index}.log`;
+}
+
+const stream = rfs.createStream(generator, {
+  path: LOG_DIR,
+  size: LOG_MAX_SIZE,
+  interval: '1d'
+});
+
+stream.on('error', (err) => console.error('[LOGGER] File stream error:', err));
+stream.on('rotated', () => {
+  pruneOldLogs().catch((err) => console.error('[LOGGER] Prune failed:', err));
+});
+
+// Keep only the LOG_MAX_FILES most recently modified rotated files, deleting
+// the rest — bounds worst-case disk usage to roughly LOG_MAX_SIZE * LOG_MAX_FILES
+// regardless of how often rotation happens.
+async function pruneOldLogs() {
+  const entries = await fs.promises.readdir(LOG_DIR);
+  const rotated = entries.filter((name) => ROTATED_PATTERN.test(name));
+
+  const withStats = await Promise.all(
+    rotated.map(async (name) => {
+      const filePath = path.join(LOG_DIR, name);
+      const stat = await fs.promises.stat(filePath);
+      return { filePath, mtimeMs: stat.mtimeMs };
+    })
+  );
+
+  withStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  const toDelete = withStats.slice(LOG_MAX_FILES);
+  await Promise.all(toDelete.map(({ filePath }) => fs.promises.unlink(filePath)));
+}
+
+function write(level, message) {
+  const line = `[${new Date().toISOString()}] ${level} ${message}`;
+  stream.write(line + '\n');
+}
+
+function info(...args) {
+  const message = args.map(String).join(' ');
+  console.log(...args);
+  write('INFO', message);
+}
+
+function error(...args) {
+  const message = args.map(String).join(' ');
+  console.error(...args);
+  write('ERROR', message);
+}
+
+module.exports = { info, error };
+
+```
+
+**Companion fix outside app scope:** pm2's own log capture (`~/.pm2/logs/`)
+mirrors all stdout/stderr independently of this logger and is not bounded by
+`LOG_MAX_FILES`/`LOG_MAX_SIZE` — those only govern this app's own rotated
+file. Fully closing the disk-fill risk on the VM also means installing
+`pm2-logrotate` once (`pm2 install pm2-logrotate`), which is a pm2-level
+concern, not something `.env` can control.
 
 ---
 
@@ -829,6 +963,9 @@ Phase 1 is complete when all of the following hold:
 * Exactly one follow-up event within a window produces that event's own normal standalone template, not a one-line `CHAIN_ESCALATION`.
 * A lone opener with nothing following it produces exactly 1 message (no phantom second message once the window elapses).
 * A device reporting battery under DP code `battery` (not just `battery_percentage`) triggers `BATTERY_LOW` correctly below 20%, and produces no message at or above 20% — not an `UNKNOWN_EVENT`.
+* A device reporting contact state under DP code `switch` (not just `doorcontact_state`) triggers `DOOR_OPENED`/`DOOR_CLOSED` with `true = open` polarity, using the same door templates and consolidation logic as `doorcontact_state` — not an `UNKNOWN_EVENT`.
+* All app-level `console.log`/`console.error` calls, plus the Tuya SDK's own per-message logging, are routed through `src/utils/logger.js` (Section 8.10) — writing to both the console (for `pm2 logs`) and a rotating file under `LOG_DIR`.
+* The active log file rotates at `LOG_MAX_SIZE` or daily, whichever comes first, and only the `LOG_MAX_FILES` most recent rotated files are retained — older ones are deleted automatically on each rotation.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

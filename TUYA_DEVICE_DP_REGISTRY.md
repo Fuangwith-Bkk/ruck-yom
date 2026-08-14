@@ -108,18 +108,20 @@ listed here is wired into the app; see the **Handled** column per category.
 
 ## `qt` — Others
 
-**Remark:** door sensor — confirmed by a real production event (2026-08-14):
-`ประตูห้องพ่อ` (a registered door sensor) sent `{"code":"battery","value":100}`.
-So at least for this device, `qt`/`battery` genuinely is a door sensor's
-battery report, not a copy/paste leftover from a switch/plug category as
-previously suspected. `switch` is still unverified — no production event has
-exercised it yet.
+**Remark:** door sensor — confirmed by real production events (2026-08-14):
+`ประตูห้องพ่อ` (a registered door sensor) sent `{"code":"battery","value":100}`
+and repeated `{"code":"switch","value":true/false}` transitions. So for this
+device, both `qt`/`battery` and `qt`/`switch` genuinely are a door sensor's
+readings, not a copy/paste leftover from a switch/plug category as
+previously suspected. `switch`'s `true=open` polarity was confirmed by
+cross-referencing a burst of production events against the Smart Life app's
+own History log (every open/close pair matched exactly).
 
 ### Status Set
 
 | Code | Type | Values | Handled |
 |---|---|---|---|
-| `switch` | Boolean | `{true, false}` | ⚠️ note: distinct DP name from `switch_1` used by `tdq` |
+| `switch` | Boolean | `{true, false}` | ✅ `DOOR_OPENED` (`true`) / `DOOR_CLOSED` (`false`) — `sensorNormalizer.js` treats it as door-contact state, same polarity as `doorcontact_state`. Distinct from `switch_1` used by `tdq`, which is relay/light control, not a door. |
 | `battery` | Integer | range 0–500, step 1, no unit | ✅ `BATTERY_LOW` when < 20% — `sensorNormalizer.js` treats it as an alias for `battery_percentage`. Range shown as 0–500 by Tuya's generic category docs, but the one real sample seen (`value: 100`) is consistent with a plain 0–100% reading, which is how it's currently interpreted. |
 
 ---
@@ -138,3 +140,4 @@ exercised it yet.
 |---|---|
 | 2026-08-14 | Renamed from `devices-format.md`; reformatted into per-category tables with a Handled/verification legend and cross-references to `sensorNormalizer.js`. |
 | 2026-08-14 | `qt`/`battery` confirmed via production event and marked ✅ handled (aliased to `battery_percentage` in `sensorNormalizer.js`); `qt` Remark updated to reflect the confirmed door-sensor mapping. |
+| 2026-08-14 | `qt`/`switch` polarity confirmed against Smart Life app History log and marked ✅ handled (mapped to `DOOR_OPENED`/`DOOR_CLOSED` in `sensorNormalizer.js`, same polarity as `doorcontact_state`). |
