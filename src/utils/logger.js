@@ -9,6 +9,13 @@ const LOG_MAX_FILES = parseInt(process.env.LOG_MAX_FILES, 10) || 7;
 const ACTIVE_FILENAME = 'ruck-yom.log';
 const ROTATED_PATTERN = /^ruck-yom-\d{4}-\d{2}-\d{2}-\d+\.log$/;
 
+// debug < info < error. Only levels >= the configured LOG_LEVEL are written
+// (to both console and file) — debug is where high-volume diagnostics (e.g.
+// the Tuya SDK's raw per-message payload dumps) live, so it's silent by
+// default and only costs disk/console noise when explicitly opted into.
+const LEVELS = { debug: 10, info: 20, error: 30 };
+const CONFIGURED_LEVEL = LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LEVELS.info;
+
 fs.mkdirSync(LOG_DIR, { recursive: true });
 
 // Rotate daily or at LOG_MAX_SIZE, whichever comes first. Rotated files get
@@ -52,21 +59,33 @@ async function pruneOldLogs() {
   await Promise.all(toDelete.map(({ filePath }) => fs.promises.unlink(filePath)));
 }
 
+// Errors keep their stack, objects get proper JSON instead of collapsing to
+// "[object Object]" under naive String() coercion (e.g. the Tuya SDK's
+// decrypted message object passed as a raw arg to its logger callback).
+function stringify(arg) {
+  if (typeof arg === 'string') return arg;
+  if (arg instanceof Error) return arg.stack || arg.message;
+  try {
+    return JSON.stringify(arg);
+  } catch {
+    return String(arg);
+  }
+}
+
 function write(level, message) {
   const line = `[${new Date().toISOString()}] ${level} ${message}`;
   stream.write(line + '\n');
 }
 
-function info(...args) {
-  const message = args.map(String).join(' ');
-  console.log(...args);
-  write('INFO', message);
+function log(levelName, consoleFn, ...args) {
+  if (LEVELS[levelName] < CONFIGURED_LEVEL) return;
+  const message = args.map(stringify).join(' ');
+  consoleFn(...args);
+  write(levelName.toUpperCase(), message);
 }
 
-function error(...args) {
-  const message = args.map(String).join(' ');
-  console.error(...args);
-  write('ERROR', message);
-}
+const debug = (...args) => log('debug', console.log, ...args);
+const info = (...args) => log('info', console.log, ...args);
+const error = (...args) => log('error', console.error, ...args);
 
-module.exports = { info, error };
+module.exports = { debug, info, error };

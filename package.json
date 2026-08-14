@@ -1,6 +1,6 @@
 {
   "name": "ruck-yom",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {

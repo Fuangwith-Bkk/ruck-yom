@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [1.3.0] - 2026-08-14
+
+### Added
+- **`ALARM_OFF` event.** Previously `alarm_switch: false` was silent (routine telemetry, matching the motion-clear/water-normal/battery-healthy pattern). Now it sends a distinct "all clear" message, so anyone alerted by `ALARM_ON` gets a corresponding close-the-loop message once the siren stops, instead of having to check the Smart Life app.
+- **`LOG_LEVEL` env var** (`debug`/`info`/`error`, default `info`). SDK-level `INFO` (the Tuya SDK's raw per-message payload dumps) is now routed to `debug` and silent by default — only written when `LOG_LEVEL=debug` is explicitly set for a debugging session. SDK-level `ERROR` always surfaces regardless.
+
+### Fixed
+- **SDK log content was being silently dropped.** The Tuya SDK invokes its `logger` callback as `logger(level, timestampString, ...messageParts)` — the real content is in the 3rd+ arguments, not the 2nd (a bare `Date.now() ` prefix). The 1.2.0 wiring only captured `(level, message)`, so every SDK log line in production showed just a bare timestamp number with the actual payload discarded.
+- **Object arguments logged as `[object Object]`.** `logger.js` used naive `String(arg)` coercion; objects (e.g. the SDK's decrypted message object) now serialize via `JSON.stringify` instead.
+
 ## [1.2.0] - 2026-08-14
 
 ### Added

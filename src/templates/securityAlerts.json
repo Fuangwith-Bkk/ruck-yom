@@ -3,6 +3,7 @@
   "DOOR_CLOSED": "มีคนปิด {{deviceName}} ครับ\n{{timestamp}}",
   "MOTION_DETECTED": "มี {{deviceName}} ครับ\n{{timestamp}}",
   "ALARM_ON": "!!! สัญญาณเตือนในบ้านดังครับ\n{{timestamp}}",
+  "ALARM_OFF": "เรียบร้อยครับ สัญญาณเตือนหยุดแล้ว ปลอดภัยแล้วนะครับ\n{{timestamp}}",
   "WATER_LEAK": "{{botName}} วิ่งมาบอกครับ! เจอน้ำรั่วที่ {{deviceName}} ครับ รีบมาดูหน่อยนะครับ กลัวบ้านเปียกหมดครับ\n{{timestamp}}",
   "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
   "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",

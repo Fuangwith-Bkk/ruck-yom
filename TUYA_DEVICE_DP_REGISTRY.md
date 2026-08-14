@@ -89,7 +89,7 @@ listed here is wired into the app; see the **Handled** column per category.
 |---|---|---|---|
 | `alarm_volume` | Enum | `low`, `middle`, `high`, `mute` | ⚠️ |
 | `alarm_time` | Integer | unit `S`, range 1–380, step 1 | ⚠️ |
-| `alarm_switch` | Boolean | `{true, false}` | ⚠️ |
+| `alarm_switch` | Boolean | `{true, false}` | ✅ `ALARM_ON` (`true`) / `ALARM_OFF` (`false`) |
 
 ---
 
@@ -141,3 +141,4 @@ own History log (every open/close pair matched exactly).
 | 2026-08-14 | Renamed from `devices-format.md`; reformatted into per-category tables with a Handled/verification legend and cross-references to `sensorNormalizer.js`. |
 | 2026-08-14 | `qt`/`battery` confirmed via production event and marked ✅ handled (aliased to `battery_percentage` in `sensorNormalizer.js`); `qt` Remark updated to reflect the confirmed door-sensor mapping. |
 | 2026-08-14 | `qt`/`switch` polarity confirmed against Smart Life app History log and marked ✅ handled (mapped to `DOOR_OPENED`/`DOOR_CLOSED` in `sensorNormalizer.js`, same polarity as `doorcontact_state`). |
+| 2026-08-14 | `sgbj`/`alarm_switch` marked ✅ handled for both `true` and `false` (`ALARM_ON`/`ALARM_OFF` in `sensorNormalizer.js`) — Boolean `{true, false}` type was already documented from the original `devices-format.md`/Tuya IoT Platform Device Debugging screen, confirming `false` is a real "off" state, not inferred. |

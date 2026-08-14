@@ -25,10 +25,19 @@ const client = new TuyaWebsocket({
   url: process.env.TUYA_MQ_URL,
   env: process.env.TUYA_MQ_ENV === 'TEST' ? TuyaWebsocket.env.TEST : TuyaWebsocket.env.PROD,
   maxRetryTimes: parseInt(process.env.TUYA_PULSAR_MAX_RETRIES, 10) || 50,
-  // The SDK's own per-message INFO logs (raw payload dumps) are the
-  // dominant source of log volume — route them through our rotating
-  // logger too, instead of leaving them as unbounded console.log output.
-  logger: (level, message) => logger.info(`[SDK:${level}]`, message)
+  // The SDK invokes this as logger(level, timestampString, ...messageParts)
+  // — the real content is in the 3rd+ args, not the 2nd (a bare "Date.now() "
+  // prefix), so all of them must be forwarded or the actual payload is
+  // silently dropped. SDK-level INFO is routed to `debug` (raw per-message
+  // payload dumps are the dominant source of log volume — silent unless
+  // LOG_LEVEL=debug is set); ERROR always surfaces via our own error level.
+  logger: (level, ...info) => {
+    if (level === 'ERROR') {
+      logger.error(`[SDK:${level}]`, ...info);
+    } else {
+      logger.debug(`[SDK:${level}]`, ...info);
+    }
+  }
 });
 
 // SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example

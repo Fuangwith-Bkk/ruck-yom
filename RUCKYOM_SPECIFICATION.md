@@ -172,6 +172,7 @@ EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidati
 LOG_DIR=./logs                                 # Optional, defaults to ./logs
 LOG_MAX_SIZE=10M                               # Rotate when the active log file hits this size. Optional, defaults to 10M.
 LOG_MAX_FILES=7                                # Keep only the N most recent rotated files. Optional, defaults to 7.
+LOG_LEVEL=info                                 # debug|info|error. debug also logs raw Tuya SDK per-message payloads. Optional, defaults to info.
 
 ```
 
@@ -239,8 +240,9 @@ ruck-yom/
 | **Relay Switch** | `switch_1` | `true` | `RELAY_ON` | 🔌 เปิดสวิตช์แล้ว |
 |  | `switch_1` | `false` | `RELAY_OFF` | 🔌 ปิดสวิตช์แล้ว |
 | **Siren** (`sgbj`) | `alarm_switch` | `true` | `ALARM_ON` | !!! สัญญาณเตือนในบ้านดังครับ |
+|  | `alarm_switch` | `false` | `ALARM_OFF` | เรียบร้อยครับ สัญญาณเตือนหยุดแล้ว ปลอดภัยแล้วนะครับ |
 
-Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), water sensor `"normal"`, battery ≥ 20%, and `alarm_switch` = `false` (no sample wording exists yet for an alarm being silenced) — is intentionally **not** mapped to an event and produces no LINE message (see Section 9 DoD). `sensorNormalizer.transform()` returns `null` for these rather than an `UNKNOWN_EVENT`.
+Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), water sensor `"normal"`, and battery ≥ 20% — is intentionally **not** mapped to an event and produces no LINE message (see Section 9 DoD). `sensorNormalizer.transform()` returns `null` for these rather than an `UNKNOWN_EVENT`. `alarm_switch = false` used to follow this same pattern, but as of `ALARM_OFF` it's now a real event (see Section 7) — anyone alerted by `ALARM_ON` gets a corresponding "all clear" message once the siren stops, rather than being left to check the Smart Life app.
 
 Some devices report battery under DP code `battery` instead of `battery_percentage` (observed in production on a door sensor) — `sensorNormalizer.js` treats both codes identically, same `<20%` threshold. Before this alias was added, `battery` fell through to `UNKNOWN_EVENT` and spammed the group on every routine reading, including healthy ones.
 
@@ -260,6 +262,7 @@ Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside th
   "DOOR_CLOSED": "มีคนปิด {{deviceName}} ครับ\n{{timestamp}}",
   "MOTION_DETECTED": "มี {{deviceName}} ครับ\n{{timestamp}}",
   "ALARM_ON": "!!! สัญญาณเตือนในบ้านดังครับ\n{{timestamp}}",
+  "ALARM_OFF": "เรียบร้อยครับ สัญญาณเตือนหยุดแล้ว ปลอดภัยแล้วนะครับ\n{{timestamp}}",
   "WATER_LEAK": "{{botName}} วิ่งมาบอกครับ! เจอน้ำรั่วที่ {{deviceName}} ครับ รีบมาดูหน่อยนะครับ กลัวบ้านเปียกหมดครับ\n{{timestamp}}",
   "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
   "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",
@@ -285,7 +288,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ```json
 {
   "name": "ruck-yom",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -528,20 +531,14 @@ class SensorNormalizer {
       }
 
       if (code === 'alarm_switch') {
-        // Only the "on" transition is alert-worthy. No sample wording was
-        // given for the alarm being silenced/cleared, so — consistent with
-        // the water/motion/battery pattern above — "off" stays routine
-        // telemetry and does not emit an event.
         const isOn = value === true || value === 'true';
-        if (isOn) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'ALARM_ON',
-            timestamp,
-            time
-          });
-        }
+        events.push({
+          deviceId,
+          deviceName,
+          eventType: isOn ? 'ALARM_ON' : 'ALARM_OFF',
+          timestamp,
+          time
+        });
         continue;
       }
 
@@ -662,6 +659,7 @@ const CLAUSES = {
   DOOR_CLOSED: (event) => `ปิด ${event.deviceName}`,
   MOTION_DETECTED: (event) => `มี ${event.deviceName}`,
   ALARM_ON: () => 'สัญญาณเตือนดังแล้ว',
+  ALARM_OFF: () => 'สัญญาณเตือนหยุดแล้ว',
   RELAY_ON: (event) => `เปิด ${event.deviceName}`,
   RELAY_OFF: (event) => `ปิด ${event.deviceName}`,
   WATER_LEAK: (event) => `น้ำรั่วที่ ${event.deviceName}`,
@@ -790,10 +788,19 @@ const client = new TuyaWebsocket({
   url: process.env.TUYA_MQ_URL,
   env: process.env.TUYA_MQ_ENV === 'TEST' ? TuyaWebsocket.env.TEST : TuyaWebsocket.env.PROD,
   maxRetryTimes: parseInt(process.env.TUYA_PULSAR_MAX_RETRIES, 10) || 50,
-  // The SDK's own per-message INFO logs (raw payload dumps) are the
-  // dominant source of log volume — route them through our rotating
-  // logger too, instead of leaving them as unbounded console.log output.
-  logger: (level, message) => logger.info(`[SDK:${level}]`, message)
+  // The SDK invokes this as logger(level, timestampString, ...messageParts)
+  // — the real content is in the 3rd+ args, not the 2nd (a bare "Date.now() "
+  // prefix), so all of them must be forwarded or the actual payload is
+  // silently dropped. SDK-level INFO is routed to `debug` (raw per-message
+  // payload dumps are the dominant source of log volume — silent unless
+  // LOG_LEVEL=debug is set); ERROR always surfaces via our own error level.
+  logger: (level, ...info) => {
+    if (level === 'ERROR') {
+      logger.error(`[SDK:${level}]`, ...info);
+    } else {
+      logger.debug(`[SDK:${level}]`, ...info);
+    }
+  }
 });
 
 // SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example
@@ -856,11 +863,20 @@ dominant source of volume. `logger.js` wraps both console output (so
 rotation — bounding worst-case disk usage to roughly
 `LOG_MAX_SIZE × LOG_MAX_FILES` regardless of log volume.
 
-The Tuya SDK (`tuya-pulsar-ws-node`) accepts a `logger` config option
-(`(level, message) => void`, defaulting to `console.log`) — `app.js` passes
-`logger.info` through it (Section 8.9) so the SDK's own noisy per-message
-logs are captured and bounded the same way as the app's own logs, instead of
-being left as raw unbounded `console.log` output.
+The Tuya SDK (`tuya-pulsar-ws-node`) accepts a `logger` config option,
+defaulting to `console.log`, invoked internally as
+`logger(level, timestampString, ...messageParts)` — the real message content
+is in the 3rd+ arguments, not the 2nd (which is just a `Date.now() `
+timestamp prefix meant for `console.log`'s default space-joining). `app.js`
+must forward all of them (Section 8.9) or the actual payload is silently
+dropped, logging only that bare timestamp number.
+
+`logger.js` also gates on a `LOG_LEVEL` env var (`debug` < `info` < `error`,
+default `info`) — SDK-level `INFO` (the raw per-message payload dumps, the
+dominant source of log volume) is routed to `debug` and is silent by
+default, only written (to both console and file) when `LOG_LEVEL=debug` is
+explicitly set for a debugging session. SDK-level `ERROR` always surfaces
+via the app's own `error` level regardless of `LOG_LEVEL`.
 
 ```javascript
 const fs = require('fs');
@@ -873,6 +889,13 @@ const LOG_MAX_FILES = parseInt(process.env.LOG_MAX_FILES, 10) || 7;
 
 const ACTIVE_FILENAME = 'ruck-yom.log';
 const ROTATED_PATTERN = /^ruck-yom-\d{4}-\d{2}-\d{2}-\d+\.log$/;
+
+// debug < info < error. Only levels >= the configured LOG_LEVEL are written
+// (to both console and file) — debug is where high-volume diagnostics (e.g.
+// the Tuya SDK's raw per-message payload dumps) live, so it's silent by
+// default and only costs disk/console noise when explicitly opted into.
+const LEVELS = { debug: 10, info: 20, error: 30 };
+const CONFIGURED_LEVEL = LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LEVELS.info;
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -917,24 +940,36 @@ async function pruneOldLogs() {
   await Promise.all(toDelete.map(({ filePath }) => fs.promises.unlink(filePath)));
 }
 
+// Errors keep their stack, objects get proper JSON instead of collapsing to
+// "[object Object]" under naive String() coercion (e.g. the Tuya SDK's
+// decrypted message object passed as a raw arg to its logger callback).
+function stringify(arg) {
+  if (typeof arg === 'string') return arg;
+  if (arg instanceof Error) return arg.stack || arg.message;
+  try {
+    return JSON.stringify(arg);
+  } catch {
+    return String(arg);
+  }
+}
+
 function write(level, message) {
   const line = `[${new Date().toISOString()}] ${level} ${message}`;
   stream.write(line + '\n');
 }
 
-function info(...args) {
-  const message = args.map(String).join(' ');
-  console.log(...args);
-  write('INFO', message);
+function log(levelName, consoleFn, ...args) {
+  if (LEVELS[levelName] < CONFIGURED_LEVEL) return;
+  const message = args.map(stringify).join(' ');
+  consoleFn(...args);
+  write(levelName.toUpperCase(), message);
 }
 
-function error(...args) {
-  const message = args.map(String).join(' ');
-  console.error(...args);
-  write('ERROR', message);
-}
+const debug = (...args) => log('debug', console.log, ...args);
+const info = (...args) => log('info', console.log, ...args);
+const error = (...args) => log('error', console.error, ...args);
 
-module.exports = { info, error };
+module.exports = { debug, info, error };
 
 ```
 
@@ -966,6 +1001,8 @@ Phase 1 is complete when all of the following hold:
 * A device reporting contact state under DP code `switch` (not just `doorcontact_state`) triggers `DOOR_OPENED`/`DOOR_CLOSED` with `true = open` polarity, using the same door templates and consolidation logic as `doorcontact_state` — not an `UNKNOWN_EVENT`.
 * All app-level `console.log`/`console.error` calls, plus the Tuya SDK's own per-message logging, are routed through `src/utils/logger.js` (Section 8.10) — writing to both the console (for `pm2 logs`) and a rotating file under `LOG_DIR`.
 * The active log file rotates at `LOG_MAX_SIZE` or daily, whichever comes first, and only the `LOG_MAX_FILES` most recent rotated files are retained — older ones are deleted automatically on each rotation.
+* With default `LOG_LEVEL=info`, the Tuya SDK's raw per-message payload dumps do not appear in the log; setting `LOG_LEVEL=debug` makes them appear, with object arguments rendered as JSON (not `[object Object]`) and no dropped content — verified per Section 8.10.
+* `ALARM_ON` followed by the alarm being silenced (`alarm_switch: false`) produces a second, distinct `ALARM_OFF` LINE message — not silence.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

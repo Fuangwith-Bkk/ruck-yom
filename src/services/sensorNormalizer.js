@@ -121,20 +121,14 @@ class SensorNormalizer {
       }
 
       if (code === 'alarm_switch') {
-        // Only the "on" transition is alert-worthy. No sample wording was
-        // given for the alarm being silenced/cleared, so — consistent with
-        // the water/motion/battery pattern above — "off" stays routine
-        // telemetry and does not emit an event.
         const isOn = value === true || value === 'true';
-        if (isOn) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'ALARM_ON',
-            timestamp,
-            time
-          });
-        }
+        events.push({
+          deviceId,
+          deviceName,
+          eventType: isOn ? 'ALARM_ON' : 'ALARM_OFF',
+          timestamp,
+          time
+        });
         continue;
       }
 

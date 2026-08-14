@@ -8,6 +8,7 @@ const CLAUSES = {
   DOOR_CLOSED: (event) => `ปิด ${event.deviceName}`,
   MOTION_DETECTED: (event) => `มี ${event.deviceName}`,
   ALARM_ON: () => 'สัญญาณเตือนดังแล้ว',
+  ALARM_OFF: () => 'สัญญาณเตือนหยุดแล้ว',
   RELAY_ON: (event) => `เปิด ${event.deviceName}`,
   RELAY_OFF: (event) => `ปิด ${event.deviceName}`,
   WATER_LEAK: (event) => `น้ำรั่วที่ ${event.deviceName}`,
