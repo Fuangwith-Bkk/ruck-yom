@@ -1,11 +1,12 @@
 {
-  "DOOR_OPENED": "🚨 แจ้งเตือนความปลอดภัย!\nอุปกรณ์: {{deviceName}}\nสถานะ: 🚪 เปิดประตูแล้ว\nเวลา: {{timestamp}}",
-  "DOOR_CLOSED": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🚪 ปิดประตูแล้ว\nเวลา: {{timestamp}}",
-  "MOTION_DETECTED": "🚨 แจ้งเตือนความปลอดภัย!\nอุปกรณ์: {{deviceName}}\nสถานะ: 🏃 ตรวจพบการเคลื่อนไหว\nเวลา: {{timestamp}}",
-  "MOTION_CLEAR": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🏃 ไม่พบการเคลื่อนไหวแล้ว\nเวลา: {{timestamp}}",
-  "WATER_LEAK": "⚠️ แจ้งเตือนภัยเร่งด่วน!\nอุปกรณ์: {{deviceName}}\nสถานะ: 💦 ตรวจพบน้ำรั่วซึม\nเวลา: {{timestamp}}",
-  "BATTERY_LOW": "⚠️ แจ้งเตือนแบตเตอรี่ต่ำ\nอุปกรณ์: {{deviceName}}\nระดับแบตเตอรี่คงเหลือ: {{batteryLevel}}%\nเวลา: {{timestamp}}",
-  "RELAY_ON": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🔌 เปิดสวิตช์แล้ว\nเวลา: {{timestamp}}",
-  "RELAY_OFF": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🔌 ปิดสวิตช์แล้ว\nเวลา: {{timestamp}}",
-  "UNKNOWN_EVENT": "🔔 แจ้งเตือนสถานะอุปกรณ์\nอุปกรณ์: {{deviceName}}\nข้อมูล: {{rawPayload}}\nเวลา: {{timestamp}}"
+  "DOOR_OPENED": "มีคนเปิด {{deviceName}} ครับ\n{{timestamp}}",
+  "DOOR_CLOSED": "มีคนปิด {{deviceName}} ครับ\n{{timestamp}}",
+  "MOTION_DETECTED": "มี {{deviceName}} ครับ\n{{timestamp}}",
+  "ALARM_ON": "!!! สัญญาณเตือนในบ้านดังครับ\n{{timestamp}}",
+  "WATER_LEAK": "{{botName}} วิ่งมาบอกครับ! เจอน้ำรั่วที่ {{deviceName}} ครับ รีบมาดูหน่อยนะครับ กลัวบ้านเปียกหมดครับ\n{{timestamp}}",
+  "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
+  "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",
+  "BATTERY_LOW": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} แบตใกล้หมดแล้ว เหลือ {{batteryLevel}}% เอง กลัวมันหมดแล้วเฝ้าบ้านไม่ได้ครับ ช่วยไปเปลี่ยนแบตให้หน่อยนะครับ\n{{timestamp}}",
+  "UNKNOWN_EVENT": "{{botName}} ได้รับแจ้งว่า\nอุปกรณ์ {{deviceName}}\nตรวจพบว่า {{rawPayload}}\nช่วย {{botName}} ดูหน่อยนะครับ\n{{timestamp}}",
+  "CHAIN_ESCALATION": "{{botName}}วิ่งมาบอกครับ! มีเหตุการณ์ต่อเนื่องเกิดขึ้นครับ:\n{{lines}}\n{{timestamp}}"
 }

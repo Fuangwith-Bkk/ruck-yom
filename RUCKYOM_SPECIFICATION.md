@@ -163,6 +163,10 @@ TUYA_MQ_ENV=PROD
 LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token
 LINE_CHANNEL_SECRET=your_line_channel_secret   # Unused until Phase 2 (webhook signature verification)
 LINE_GROUP_ID=your_target_line_group_id
+LINE_BOT_NAME=รักยม                            # Used as {{botName}} in alert templates. Optional, defaults to รักยม.
+
+# Event Consolidation
+EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidation window (ms). Optional, defaults to 15000.
 
 ```
 
@@ -225,11 +229,16 @@ ruck-yom/
 |  | `doorcontact_state` | `false` | `DOOR_CLOSED` | 🚪 ปิดประตูแล้ว |
 | **PIR Motion Sensor** | `pir` | `"pir"` / `true` | `MOTION_DETECTED` | 🏃 ตรวจพบการเคลื่อนไหว |
 | **Water Leak Sensor** | `watersensor_state` | `"alarm"` / `true` | `WATER_LEAK` | 💦 ตรวจพบน้ำรั่วซึม |
-| **Battery Level** | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` | ⚠️ แบตเตอรี่ต่ำ (< 20%) |
+| **Battery Level** | `battery_percentage` or `battery` | `number` (0–100) | `BATTERY_LOW` | ⚠️ แบตเตอรี่ต่ำ (< 20%) |
 | **Relay Switch** | `switch_1` | `true` | `RELAY_ON` | 🔌 เปิดสวิตช์แล้ว |
 |  | `switch_1` | `false` | `RELAY_OFF` | 🔌 ปิดสวิตช์แล้ว |
+| **Siren** (`sgbj`) | `alarm_switch` | `true` | `ALARM_ON` | !!! สัญญาณเตือนในบ้านดังครับ |
 
-Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), water sensor `"normal"`, and battery ≥ 20% — is intentionally **not** mapped to an event and produces no LINE message (see Section 9 DoD). `sensorNormalizer.transform()` returns `null` for these rather than an `UNKNOWN_EVENT`.
+Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), water sensor `"normal"`, battery ≥ 20%, and `alarm_switch` = `false` (no sample wording exists yet for an alarm being silenced) — is intentionally **not** mapped to an event and produces no LINE message (see Section 9 DoD). `sensorNormalizer.transform()` returns `null` for these rather than an `UNKNOWN_EVENT`.
+
+Some devices report battery under DP code `battery` instead of `battery_percentage` (observed in production on a door sensor) — `sensorNormalizer.js` treats both codes identically, same `<20%` threshold. Before this alias was added, `battery` fell through to `UNKNOWN_EVENT` and spammed the group on every routine reading, including healthy ones.
+
+Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside the full `timestamp` (`DD/MM/YY HH:MM:ss`) — `time` is only used by the Event Correlator (Section 8.8) for the per-line stamps inside a consolidated chain message; every standalone message still renders the full `timestamp`.
 
 ---
 
@@ -239,20 +248,25 @@ Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), wat
 
 ```json
 {
-  "DOOR_OPENED": "🚨 แจ้งเตือนความปลอดภัย!\nอุปกรณ์: {{deviceName}}\nสถานะ: 🚪 เปิดประตูแล้ว\nเวลา: {{timestamp}}",
-  "DOOR_CLOSED": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🚪 ปิดประตูแล้ว\nเวลา: {{timestamp}}",
-  "MOTION_DETECTED": "🚨 แจ้งเตือนความปลอดภัย!\nอุปกรณ์: {{deviceName}}\nสถานะ: 🏃 ตรวจพบการเคลื่อนไหว\nเวลา: {{timestamp}}",
-  "MOTION_CLEAR": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🏃 ไม่พบการเคลื่อนไหวแล้ว\nเวลา: {{timestamp}}",
-  "WATER_LEAK": "⚠️ แจ้งเตือนภัยเร่งด่วน!\nอุปกรณ์: {{deviceName}}\nสถานะ: 💦 ตรวจพบน้ำรั่วซึม\nเวลา: {{timestamp}}",
-  "BATTERY_LOW": "⚠️ แจ้งเตือนแบตเตอรี่ต่ำ\nอุปกรณ์: {{deviceName}}\nระดับแบตเตอรี่คงเหลือ: {{batteryLevel}}%\nเวลา: {{timestamp}}",
-  "RELAY_ON": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🔌 เปิดสวิตช์แล้ว\nเวลา: {{timestamp}}",
-  "RELAY_OFF": "ℹ️ แจ้งเตือนระบบ\nอุปกรณ์: {{deviceName}}\nสถานะ: 🔌 ปิดสวิตช์แล้ว\nเวลา: {{timestamp}}",
-  "UNKNOWN_EVENT": "🔔 แจ้งเตือนสถานะอุปกรณ์\nอุปกรณ์: {{deviceName}}\nข้อมูล: {{rawPayload}}\nเวลา: {{timestamp}}"
+  "DOOR_OPENED": "มีคนเปิด {{deviceName}} ครับ\n{{timestamp}}",
+  "DOOR_CLOSED": "มีคนปิด {{deviceName}} ครับ\n{{timestamp}}",
+  "MOTION_DETECTED": "มี {{deviceName}} ครับ\n{{timestamp}}",
+  "ALARM_ON": "!!! สัญญาณเตือนในบ้านดังครับ\n{{timestamp}}",
+  "WATER_LEAK": "{{botName}} วิ่งมาบอกครับ! เจอน้ำรั่วที่ {{deviceName}} ครับ รีบมาดูหน่อยนะครับ กลัวบ้านเปียกหมดครับ\n{{timestamp}}",
+  "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
+  "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",
+  "BATTERY_LOW": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} แบตใกล้หมดแล้ว เหลือ {{batteryLevel}}% เอง กลัวมันหมดแล้วเฝ้าบ้านไม่ได้ครับ ช่วยไปเปลี่ยนแบตให้หน่อยนะครับ\n{{timestamp}}",
+  "UNKNOWN_EVENT": "{{botName}} ได้รับแจ้งว่า\nอุปกรณ์ {{deviceName}}\nตรวจพบว่า {{rawPayload}}\nช่วย {{botName}} ดูหน่อยนะครับ\n{{timestamp}}",
+  "CHAIN_ESCALATION": "{{botName}}วิ่งมาบอกครับ! มีเหตุการณ์ต่อเนื่องเกิดขึ้นครับ:\n{{lines}}\n{{timestamp}}"
 }
 
 ```
 
-Note: `MOTION_CLEAR` remains defined above for completeness/history, but `sensorNormalizer.js` (Section 8.5) no longer emits that `eventType` — it is unreachable in practice.
+Voice: `รักยม` is written as a small child assigned to watch the house, running over to tell you what happened — direct/urgent for the events the user specified exact wording for (door, alarm, motion, breaker, unknown), and that same "ran to tell you" framing for the two event types that had no user-specified wording (`WATER_LEAK`, `BATTERY_LOW`).
+
+`{{botName}}` resolves from `LINE_BOT_NAME` (default `รักยม`, see Section 4 env vars) — it's a `TemplateEngine` constructor default, not a LINE API lookup, so changing it costs nothing at runtime (Section 8.6).
+
+`CHAIN_ESCALATION` is the one template that isn't rendered from a flat event object — its `{{lines}}` value is built dynamically by the Event Correlator (Section 8.8) as one bullet per buffered event, in the order they occurred, each with its own `HH:MM:ss` stamp. `MOTION_CLEAR` has been removed — it was already dead code (`sensorNormalizer.js` never emitted it).
 
 ---
 
@@ -263,7 +277,7 @@ Note: `MOTION_CLEAR` remains defined above for completeness/history, but `sensor
 ```json
 {
   "name": "ruck-yom",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -312,20 +326,37 @@ module.exports = { validateEnv };
 ### 8.3 Timezone Utility (`src/utils/dateTime.js`)
 
 ```javascript
-function getBangkokTimestamp(date = new Date()) {
+function getBangkokDateParts(date = new Date()) {
   return new Intl.DateTimeFormat('en-GB', {
     timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
-    year: 'numeric',
-    month: 'short',
     day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
     hour12: false
-  }).format(date) + ' (Bangkok)';
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
 }
 
-module.exports = { getBangkokTimestamp };
+// DD/MM/YY HH:MM:ss — used at the end of every LINE alert message.
+function getBangkokTimestamp(date = new Date()) {
+  const p = getBangkokDateParts(date);
+  return `${p.day}/${p.month}/${p.year} ${p.hour}:${p.minute}:${p.second}`;
+}
+
+// HH:MM:ss only — used for the per-line timestamps inside a consolidated
+// (multi-event) chain escalation message, where each line needs its own
+// time but repeating the full date on every line would be noise.
+function getBangkokTime(date = new Date()) {
+  const p = getBangkokDateParts(date);
+  return `${p.hour}:${p.minute}:${p.second}`;
+}
+
+module.exports = { getBangkokTimestamp, getBangkokTime };
 
 ```
 
@@ -366,7 +397,7 @@ module.exports = LRUDeduplicator;
 
 ```javascript
 const deviceRegistry = require('../config/deviceRegistry');
-const { getBangkokTimestamp } = require('../utils/dateTime');
+const { getBangkokTimestamp, getBangkokTime } = require('../utils/dateTime');
 
 class SensorNormalizer {
   transform(rawMessage) {
@@ -376,7 +407,12 @@ class SensorNormalizer {
 
     const deviceId = rawMessage.devId;
     const deviceName = deviceRegistry[deviceId] || `Sensor (${deviceId.substring(0, 6)}...)`;
-    const timestamp = getBangkokTimestamp(new Date(rawMessage.eventTime || Date.now()));
+    const eventDate = new Date(rawMessage.eventTime || Date.now());
+    const timestamp = getBangkokTimestamp(eventDate);
+    // Short HH:MM:ss, used for per-line stamps in a consolidated chain
+    // escalation message (see eventCorrelator.js) — the full `timestamp`
+    // above is still what every standalone message renders.
+    const time = getBangkokTime(eventDate);
 
     // NOTE: a single Pulsar message's `status` array can carry multiple DPs
     // (e.g. a battery reading riding along with a door-state change). We
@@ -393,7 +429,8 @@ class SensorNormalizer {
           deviceId,
           deviceName,
           eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
-          timestamp
+          timestamp,
+          time
         });
         continue;
       }
@@ -410,7 +447,8 @@ class SensorNormalizer {
             deviceId,
             deviceName,
             eventType: 'MOTION_DETECTED',
-            timestamp
+            timestamp,
+            time
           });
         }
         continue;
@@ -422,7 +460,8 @@ class SensorNormalizer {
           deviceId,
           deviceName,
           eventType: isOn ? 'RELAY_ON' : 'RELAY_OFF',
-          timestamp
+          timestamp,
+          time
         });
         continue;
       }
@@ -438,13 +477,14 @@ class SensorNormalizer {
             deviceId,
             deviceName,
             eventType: 'WATER_LEAK',
-            timestamp
+            timestamp,
+            time
           });
         }
         continue;
       }
 
-      if (code === 'battery_percentage' && typeof value === 'number') {
+      if ((code === 'battery_percentage' || code === 'battery') && typeof value === 'number') {
         // Only low-battery is alert-worthy; a healthy reading is routine
         // telemetry and must not be emitted as an event.
         if (value < 20) {
@@ -453,7 +493,26 @@ class SensorNormalizer {
             deviceName,
             eventType: 'BATTERY_LOW',
             batteryLevel: value,
-            timestamp
+            timestamp,
+            time
+          });
+        }
+        continue;
+      }
+
+      if (code === 'alarm_switch') {
+        // Only the "on" transition is alert-worthy. No sample wording was
+        // given for the alarm being silenced/cleared, so — consistent with
+        // the water/motion/battery pattern above — "off" stays routine
+        // telemetry and does not emit an event.
+        const isOn = value === true || value === 'true';
+        if (isOn) {
+          events.push({
+            deviceId,
+            deviceName,
+            eventType: 'ALARM_ON',
+            timestamp,
+            time
           });
         }
         continue;
@@ -467,14 +526,15 @@ class SensorNormalizer {
         deviceName,
         eventType: 'UNKNOWN_EVENT',
         rawPayload: JSON.stringify(dp),
-        timestamp
+        timestamp,
+        time
       });
     }
 
     // Return null (not an empty array) when nothing alert-worthy occurred,
-    // so callers can `if (!event) return;` as in Section 8.8 without change.
+    // so callers can `if (!event) return;` as in Section 8.9 without change.
     // Callers that need multi-event handling should iterate this array;
-    // see the updated app.js snippet in Section 8.8.
+    // see the updated app.js snippet in Section 8.9.
     return events.length > 0 ? events : null;
   }
 }
@@ -489,16 +549,18 @@ module.exports = SensorNormalizer;
 const alertsTemplate = require('../templates/securityAlerts.json');
 
 class TemplateEngine {
-  constructor(templates = alertsTemplate) {
+  constructor(templates = alertsTemplate, botName = process.env.LINE_BOT_NAME || 'รักยม') {
     this.templates = templates;
+    this.botName = botName;
   }
 
   render(event) {
     const templateStr = this.templates[event.eventType] || this.templates['UNKNOWN_EVENT'];
-    
+    const context = { botName: this.botName, ...event };
+
     return templateStr.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, key) => {
-      if (key in event) {
-        return event[key];
+      if (key in context) {
+        return context[key];
       }
       return match;
     });
@@ -538,7 +600,138 @@ module.exports = LineMessagingService;
 
 ```
 
-### 8.8 Application Entry Point (`src/app.js`)
+### 8.8 Event Correlator (`src/services/eventCorrelator.js`)
+
+Solves the message-bombardment problem: bursts of activity from *any*
+sensor(s) close together in time previously sent one separate LINE ping per
+event, no matter how obviously related they were (e.g. a door
+opening/closing a few times, or a light switching on then off a moment
+later). The **first event of a burst always sends immediately** — no delay,
+since it might be security-critical — but every event of *any* type that
+arrives while that window is still open gets buffered instead of sent
+standalone, then folded into one `CHAIN_ESCALATION` message when the window
+closes. This is a general debounce, not a hardcoded door→motion→alarm
+sequence: any device, any event type, can open a window or join one already
+open. The window flushes early the moment `ALARM_ON` arrives (`TERMINAL_EVENT`),
+since there's nothing to gain from waiting once the worst-case event is
+already confirmed.
+
+Each buffered event contributes one line to `CHAIN_ESCALATION`'s `{{lines}}`,
+via a short per-eventType clause (`CLAUSES`) plus its own `time` — every
+eventType the normalizer can emit has an entry, since any of them can now
+land inside a window. If a window closes with **exactly one** follow-up
+event, that event is sent as its own normal standalone alert instead of
+being wrapped in a single-line `CHAIN_ESCALATION` — consolidation only
+kicks in once there's actually more than one thing to summarize.
+
+```javascript
+// Short, timestamp-free clause per eventType — used to build one line of a
+// CHAIN_ESCALATION message. Every eventType the normalizer can emit needs an
+// entry here, since any of them can now land inside a consolidated window.
+const CLAUSES = {
+  DOOR_OPENED: (event) => `เปิด ${event.deviceName}`,
+  DOOR_CLOSED: (event) => `ปิด ${event.deviceName}`,
+  MOTION_DETECTED: (event) => `มี ${event.deviceName}`,
+  ALARM_ON: () => 'สัญญาณเตือนดังแล้ว',
+  RELAY_ON: (event) => `เปิด ${event.deviceName}`,
+  RELAY_OFF: (event) => `ปิด ${event.deviceName}`,
+  WATER_LEAK: (event) => `น้ำรั่วที่ ${event.deviceName}`,
+  BATTERY_LOW: (event) => `${event.deviceName} แบตเหลือ ${event.batteryLevel}%`,
+  UNKNOWN_EVENT: (event) => `${event.deviceName} มีเหตุการณ์ไม่ทราบสาเหตุ`
+};
+
+// The eventType that always flushes an open window immediately instead of
+// waiting out the full WINDOW_MS — there's no benefit to delaying once the
+// worst-case event has already happened.
+const TERMINAL_EVENT = 'ALARM_ON';
+
+const windowMs = () => Number(process.env.EVENT_CORRELATION_WINDOW_MS) || 15000;
+
+class EventCorrelator {
+  constructor(templateEngine, lineService) {
+    this.templateEngine = templateEngine;
+    this.lineService = lineService;
+    // Only one window active at a time by design — this is a single-house
+    // system with no per-zone device metadata, so there's no reliable way
+    // to tell two concurrent incidents apart anyway.
+    this.openWindow = null;
+  }
+
+  // Any eventType from any device can open a window or join one already
+  // open — the goal is simply "don't send N separate pings for activity
+  // that's clearly part of one burst." The first event of a burst always
+  // sends immediately (no delay); everything else in that burst gets
+  // buffered and folded into one CHAIN_ESCALATION when the window closes.
+  async process(event) {
+    const { eventType } = event;
+
+    if (this.openWindow) {
+      this.openWindow.events.push(event);
+      console.log(`[CORRELATOR] Buffered (${eventType}) into open window`);
+      if (eventType === TERMINAL_EVENT) {
+        await this._flush();
+      }
+      return;
+    }
+
+    await this._push(event);
+    this._openWindow();
+    this.openWindow.events.push(event);
+  }
+
+  _openWindow() {
+    this.openWindow = {
+      events: [],
+      timer: setTimeout(() => {
+        this._flush().catch((err) => console.error('[CORRELATOR] Flush failed:', err));
+      }, windowMs())
+    };
+  }
+
+  async _flush() {
+    if (!this.openWindow) return;
+    const { events, timer } = this.openWindow;
+    clearTimeout(timer);
+    this.openWindow = null;
+
+    // events[0] is the opener, already sent standalone above. If nothing
+    // followed it, there's nothing more to report.
+    if (events.length <= 1) return;
+
+    const followUps = events.slice(1);
+
+    // Exactly one follow-up: send it as its own normal alert rather than
+    // wrapping a single line in a CHAIN_ESCALATION.
+    if (followUps.length === 1) {
+      await this._push(followUps[0]);
+      return;
+    }
+
+    const lines = followUps
+      .filter((event) => CLAUSES[event.eventType])
+      .map((event) => `- ${CLAUSES[event.eventType](event)} (${event.time})`);
+
+    if (lines.length === 0) return;
+
+    await this._push({
+      eventType: 'CHAIN_ESCALATION',
+      lines: lines.join('\n'),
+      timestamp: events[events.length - 1].timestamp
+    });
+  }
+
+  async _push(event) {
+    const text = this.templateEngine.render(event);
+    await this.lineService.pushMessage(text);
+    console.log(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
+  }
+}
+
+module.exports = EventCorrelator;
+
+```
+
+### 8.9 Application Entry Point (`src/app.js`)
 
 ```javascript
 require('dotenv').config();
@@ -553,17 +746,19 @@ const LRUDeduplicator = require('./adapters/memory/lruDeduplicator');
 const SensorNormalizer = require('./services/sensorNormalizer');
 const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
+const EventCorrelator = require('./services/eventCorrelator');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
 const normalizer = new SensorNormalizer();
 const templateEngine = new TemplateEngine();
 const lineService = new LineMessagingService();
+const correlator = new EventCorrelator(templateEngine, lineService);
 
 const client = new TuyaWebsocket({
   accessId: process.env.TUYA_ACCESS_ID,
   accessKey: process.env.TUYA_ACCESS_SECRET,
   url: process.env.TUYA_MQ_URL,
-  env: TuyaWebsocket.env.PROD,
+  env: process.env.TUYA_MQ_ENV === 'TEST' ? TuyaWebsocket.env.TEST : TuyaWebsocket.env.PROD,
   maxRetryTimes: parseInt(process.env.TUYA_PULSAR_MAX_RETRIES, 10) || 50
 });
 
@@ -588,12 +783,12 @@ client.message(async (ws, message) => {
     const events = normalizer.transform(rawData);
     if (!events) return;
 
-    // 4-5. Format and deliver each event independently, so one slow/failed
-    // push doesn't block the others in the same message.
+    // 4-5. Route each event through the correlator, which decides whether
+    // to push it immediately, buffer it as part of an in-progress
+    // consolidation window, or flush a consolidated message — see
+    // Section 8.8.
     for (const event of events) {
-      const formattedText = templateEngine.render(event);
-      await lineService.pushMessage(formattedText);
-      console.log(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName}`);
+      await correlator.process(event);
     }
 
   } catch (err) {
@@ -628,6 +823,12 @@ Phase 1 is complete when all of the following hold:
 * A single Pulsar message carrying multiple DPs (e.g. door state + battery reading together) results in one LINE message per relevant DP, not just the first.
 * The process survives a forced network interruption and reconnects without manual restart, honoring `TUYA_PULSAR_MAX_RETRIES`.
 * `node src/app.js` boots cleanly with only the Phase 1 `REQUIRED_ENV` vars set (Section 8.2) — no failures from Phase 2/3 vars being absent.
+* `TUYA_MQ_ENV=TEST` in `.env` actually connects to the Tuya Pulsar test topic (`event-test`), not the production one — verified via `src/app.js`'s `env:` selection (Section 8.9).
+* A `DOOR_OPENED` → `MOTION_DETECTED` → `ALARM_ON` sequence within `EVENT_CORRELATION_WINDOW_MS` produces exactly 2 LINE messages (the immediate door alert + one `CHAIN_ESCALATION` with both follow-ups), not 3 — verified per Section 8.8.
+* A burst of 3+ events of *any* type (not just door/motion/alarm — e.g. a relay toggling twice) within the window produces exactly 2 messages: the immediate opener + one `CHAIN_ESCALATION` covering everything after it.
+* Exactly one follow-up event within a window produces that event's own normal standalone template, not a one-line `CHAIN_ESCALATION`.
+* A lone opener with nothing following it produces exactly 1 message (no phantom second message once the window elapses).
+* A device reporting battery under DP code `battery` (not just `battery_percentage`) triggers `BATTERY_LOW` correctly below 20%, and produces no message at or above 20% — not an `UNKNOWN_EVENT`.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

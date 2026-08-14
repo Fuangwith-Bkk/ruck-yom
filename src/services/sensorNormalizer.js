@@ -1,5 +1,5 @@
 const deviceRegistry = require('../config/deviceRegistry');
-const { getBangkokTimestamp } = require('../utils/dateTime');
+const { getBangkokTimestamp, getBangkokTime } = require('../utils/dateTime');
 
 class SensorNormalizer {
   transform(rawMessage) {
@@ -9,7 +9,12 @@ class SensorNormalizer {
 
     const deviceId = rawMessage.devId;
     const deviceName = deviceRegistry[deviceId] || `Sensor (${deviceId.substring(0, 6)}...)`;
-    const timestamp = getBangkokTimestamp(new Date(rawMessage.eventTime || Date.now()));
+    const eventDate = new Date(rawMessage.eventTime || Date.now());
+    const timestamp = getBangkokTimestamp(eventDate);
+    // Short HH:MM:ss, used for per-line stamps in a consolidated chain
+    // escalation message (see eventCorrelator.js) — the full `timestamp`
+    // above is still what every standalone message renders.
+    const time = getBangkokTime(eventDate);
 
     // NOTE: a single Pulsar message's `status` array can carry multiple DPs
     // (e.g. a battery reading riding along with a door-state change). We
@@ -26,7 +31,8 @@ class SensorNormalizer {
           deviceId,
           deviceName,
           eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
-          timestamp
+          timestamp,
+          time
         });
         continue;
       }
@@ -43,7 +49,8 @@ class SensorNormalizer {
             deviceId,
             deviceName,
             eventType: 'MOTION_DETECTED',
-            timestamp
+            timestamp,
+            time
           });
         }
         continue;
@@ -55,7 +62,8 @@ class SensorNormalizer {
           deviceId,
           deviceName,
           eventType: isOn ? 'RELAY_ON' : 'RELAY_OFF',
-          timestamp
+          timestamp,
+          time
         });
         continue;
       }
@@ -71,13 +79,14 @@ class SensorNormalizer {
             deviceId,
             deviceName,
             eventType: 'WATER_LEAK',
-            timestamp
+            timestamp,
+            time
           });
         }
         continue;
       }
 
-      if (code === 'battery_percentage' && typeof value === 'number') {
+      if ((code === 'battery_percentage' || code === 'battery') && typeof value === 'number') {
         // Only low-battery is alert-worthy; a healthy reading is routine
         // telemetry and must not be emitted as an event.
         if (value < 20) {
@@ -86,7 +95,26 @@ class SensorNormalizer {
             deviceName,
             eventType: 'BATTERY_LOW',
             batteryLevel: value,
-            timestamp
+            timestamp,
+            time
+          });
+        }
+        continue;
+      }
+
+      if (code === 'alarm_switch') {
+        // Only the "on" transition is alert-worthy. No sample wording was
+        // given for the alarm being silenced/cleared, so — consistent with
+        // the water/motion/battery pattern above — "off" stays routine
+        // telemetry and does not emit an event.
+        const isOn = value === true || value === 'true';
+        if (isOn) {
+          events.push({
+            deviceId,
+            deviceName,
+            eventType: 'ALARM_ON',
+            timestamp,
+            time
           });
         }
         continue;
@@ -100,14 +128,15 @@ class SensorNormalizer {
         deviceName,
         eventType: 'UNKNOWN_EVENT',
         rawPayload: JSON.stringify(dp),
-        timestamp
+        timestamp,
+        time
       });
     }
 
     // Return null (not an empty array) when nothing alert-worthy occurred,
-    // so callers can `if (!event) return;` as in Section 8.8 without change.
+    // so callers can `if (!event) return;` as in Section 8.9 without change.
     // Callers that need multi-event handling should iterate this array;
-    // see the updated app.js snippet in Section 8.8.
+    // see the updated app.js snippet in Section 8.9.
     return events.length > 0 ? events : null;
   }
 }

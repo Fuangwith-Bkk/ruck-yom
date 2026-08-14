@@ -10,17 +10,19 @@ const LRUDeduplicator = require('./adapters/memory/lruDeduplicator');
 const SensorNormalizer = require('./services/sensorNormalizer');
 const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
+const EventCorrelator = require('./services/eventCorrelator');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
 const normalizer = new SensorNormalizer();
 const templateEngine = new TemplateEngine();
 const lineService = new LineMessagingService();
+const correlator = new EventCorrelator(templateEngine, lineService);
 
 const client = new TuyaWebsocket({
   accessId: process.env.TUYA_ACCESS_ID,
   accessKey: process.env.TUYA_ACCESS_SECRET,
   url: process.env.TUYA_MQ_URL,
-  env: TuyaWebsocket.env.PROD,
+  env: process.env.TUYA_MQ_ENV === 'TEST' ? TuyaWebsocket.env.TEST : TuyaWebsocket.env.PROD,
   maxRetryTimes: parseInt(process.env.TUYA_PULSAR_MAX_RETRIES, 10) || 50
 });
 
@@ -45,12 +47,12 @@ client.message(async (ws, message) => {
     const events = normalizer.transform(rawData);
     if (!events) return;
 
-    // 4-5. Format and deliver each event independently, so one slow/failed
-    // push doesn't block the others in the same message.
+    // 4-5. Route each event through the correlator, which decides whether
+    // to push it immediately, buffer it as part of an in-progress chain
+    // (e.g. door -> motion -> alarm), or flush a consolidated message —
+    // see src/services/eventCorrelator.js.
     for (const event of events) {
-      const formattedText = templateEngine.render(event);
-      await lineService.pushMessage(formattedText);
-      console.log(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName}`);
+      await correlator.process(event);
     }
 
   } catch (err) {
