@@ -288,7 +288,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ```json
 {
   "name": "ruck-yom",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -368,7 +368,32 @@ function getBangkokTime(date = new Date()) {
   return `${p.hour}:${p.minute}:${p.second}`;
 }
 
-module.exports = { getBangkokTimestamp, getBangkokTime };
+// YYYY-MM-DD HH:mm:ss.SSS (Bangkok) — used for log file lines, so they
+// align with `date` on the server instead of the raw UTC that
+// `new Date().toISOString()` would give, and sort correctly as plain text.
+// getBangkokDateParts() uses a 2-digit year for the DD/MM/YY display
+// timestamp above; logs need an unambiguous 4-digit year, so this computes
+// its own parts rather than reusing that shared helper.
+function getBangkokLogTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  // Milliseconds-within-the-second are timezone-invariant, so no conversion needed.
+  const ms = String(date.getMilliseconds()).padStart(3, '0');
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
+}
+
+module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp };
 
 ```
 
@@ -749,6 +774,11 @@ class EventCorrelator {
 
   async _push(event) {
     const text = this.templateEngine.render(event);
+    // Exact rendered text, before it's sent — debug-only since it's
+    // effectively a duplicate of the [ALERT_SENT] line below, but useful
+    // to confirm the actual wording delivered vs. what a template change
+    // was expected to produce.
+    logger.debug(`[LINE_OUT] (${event.eventType})`, text);
     await this.lineService.pushMessage(text);
     logger.info(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
   }
@@ -821,6 +851,10 @@ client.message(async (ws, message) => {
     // 3. Normalize raw event payload (may yield 0, 1, or several events —
     //    see Section 8.5 note on multi-DP Pulsar messages)
     const rawData = message && message.payload && message.payload.data;
+    // Decrypted device payload only (devId, status[]) — easier to grep/read
+    // than the SDK's own [SDK:INFO] dumps, which include the base64/crypto
+    // envelope. debug-only since this is per-message volume.
+    logger.debug('[TUYA_IN]', rawData);
     const events = normalizer.transform(rawData);
     if (!events) return;
 
@@ -878,10 +912,26 @@ default, only written (to both console and file) when `LOG_LEVEL=debug` is
 explicitly set for a debugging session. SDK-level `ERROR` always surfaces
 via the app's own `error` level regardless of `LOG_LEVEL`.
 
+At `LOG_LEVEL=debug`, two focused payload logs are also available for
+investigation, separate from the SDK's own noisier `[SDK:INFO]` dumps
+(which include the base64/crypto envelope): `[TUYA_IN]` — the decrypted
+device payload (`devId`, `status[]`) as received, logged in `app.js` right
+after decryption/before normalization (Section 8.9); and `[LINE_OUT]` — the
+exact rendered text about to be sent to LINE, logged in `eventCorrelator.js`
+just before `pushMessage()` (Section 8.8). Both use `logger.debug()`, so
+they cost nothing at the default `LOG_LEVEL=info`.
+
+File log lines use `getBangkokLogTimestamp()` (`src/utils/dateTime.js`,
+Section 8.3) instead of `new Date().toISOString()`, so they read in the
+server's local time (`TIMEZONE`, default `Asia/Bangkok`) rather than UTC —
+otherwise a log timestamp and `date` on the VM could differ by several
+hours, complicating investigation.
+
 ```javascript
 const fs = require('fs');
 const path = require('path');
 const rfs = require('rotating-file-stream');
+const { getBangkokLogTimestamp } = require('./dateTime');
 
 const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, '../../logs');
 const LOG_MAX_SIZE = process.env.LOG_MAX_SIZE || '10M';
@@ -954,7 +1004,7 @@ function stringify(arg) {
 }
 
 function write(level, message) {
-  const line = `[${new Date().toISOString()}] ${level} ${message}`;
+  const line = `[${getBangkokLogTimestamp()}] ${level} ${message}`;
   stream.write(line + '\n');
 }
 
@@ -1002,6 +1052,8 @@ Phase 1 is complete when all of the following hold:
 * All app-level `console.log`/`console.error` calls, plus the Tuya SDK's own per-message logging, are routed through `src/utils/logger.js` (Section 8.10) — writing to both the console (for `pm2 logs`) and a rotating file under `LOG_DIR`.
 * The active log file rotates at `LOG_MAX_SIZE` or daily, whichever comes first, and only the `LOG_MAX_FILES` most recent rotated files are retained — older ones are deleted automatically on each rotation.
 * With default `LOG_LEVEL=info`, the Tuya SDK's raw per-message payload dumps do not appear in the log; setting `LOG_LEVEL=debug` makes them appear, with object arguments rendered as JSON (not `[object Object]`) and no dropped content — verified per Section 8.10.
+* Log file lines show the server's local Bangkok time (matching `date` on the VM), not raw UTC — verified via `getBangkokLogTimestamp()` (Section 8.3).
+* At `LOG_LEVEL=debug`, `[TUYA_IN]` shows the decrypted device payload for every incoming message and `[LINE_OUT]` shows the exact rendered text before each LINE push — both absent at the default `LOG_LEVEL=info`.
 * `ALARM_ON` followed by the alarm being silenced (`alarm_switch: false`) produces a second, distinct `ALARM_OFF` LINE message — not silence.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code

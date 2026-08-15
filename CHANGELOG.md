@@ -3,6 +3,15 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [1.4.0] - 2026-08-15
+
+### Added
+- `[TUYA_IN]`/`[LINE_OUT]` debug-level payload logs — the decrypted device payload as received (`app.js`) and the exact rendered text before each LINE push (`eventCorrelator.js`). Both silent at the default `LOG_LEVEL=info`, available on demand at `LOG_LEVEL=debug` for investigation, without the noise of the SDK's own `[SDK:INFO]` dumps.
+- `getBangkokLogTimestamp()` (`src/utils/dateTime.js`) — `YYYY-MM-DD HH:mm:ss.SSS` in server-local (Bangkok) time.
+
+### Fixed
+- Log file timestamps used raw UTC (`new Date().toISOString()`), several hours off from `date` on the production VM — now use `getBangkokLogTimestamp()`, matching server time for easier log/incident correlation.
+
 ## [1.3.0] - 2026-08-14
 
 ### Added

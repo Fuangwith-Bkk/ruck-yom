@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const rfs = require('rotating-file-stream');
+const { getBangkokLogTimestamp } = require('./dateTime');
 
 const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, '../../logs');
 const LOG_MAX_SIZE = process.env.LOG_MAX_SIZE || '10M';
@@ -73,7 +74,7 @@ function stringify(arg) {
 }
 
 function write(level, message) {
-  const line = `[${new Date().toISOString()}] ${level} ${message}`;
+  const line = `[${getBangkokLogTimestamp()}] ${level} ${message}`;
   stream.write(line + '\n');
 }
 

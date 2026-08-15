@@ -58,6 +58,10 @@ client.message(async (ws, message) => {
     // 3. Normalize raw event payload (may yield 0, 1, or several events —
     //    see Section 8.5 note on multi-DP Pulsar messages)
     const rawData = message && message.payload && message.payload.data;
+    // Decrypted device payload only (devId, status[]) — easier to grep/read
+    // than the SDK's own [SDK:INFO] dumps, which include the base64/crypto
+    // envelope. debug-only since this is per-message volume.
+    logger.debug('[TUYA_IN]', rawData);
     const events = normalizer.transform(rawData);
     if (!events) return;
 

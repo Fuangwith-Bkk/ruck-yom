@@ -98,6 +98,11 @@ class EventCorrelator {
 
   async _push(event) {
     const text = this.templateEngine.render(event);
+    // Exact rendered text, before it's sent — debug-only since it's
+    // effectively a duplicate of the [ALERT_SENT] line below, but useful
+    // to confirm the actual wording delivered vs. what a template change
+    // was expected to produce.
+    logger.debug(`[LINE_OUT] (${event.eventType})`, text);
     await this.lineService.pushMessage(text);
     logger.info(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${event.deviceName || 'chain escalation'}`);
   }

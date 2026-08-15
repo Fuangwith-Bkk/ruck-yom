@@ -28,4 +28,29 @@ function getBangkokTime(date = new Date()) {
   return `${p.hour}:${p.minute}:${p.second}`;
 }
 
-module.exports = { getBangkokTimestamp, getBangkokTime };
+// YYYY-MM-DD HH:mm:ss.SSS (Bangkok) — used for log file lines, so they
+// align with `date` on the server instead of the raw UTC that
+// `new Date().toISOString()` would give, and sort correctly as plain text.
+// getBangkokDateParts() uses a 2-digit year for the DD/MM/YY display
+// timestamp above; logs need an unambiguous 4-digit year, so this computes
+// its own parts rather than reusing that shared helper.
+function getBangkokLogTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  // Milliseconds-within-the-second are timezone-invariant, so no conversion needed.
+  const ms = String(date.getMilliseconds()).padStart(3, '0');
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
+}
+
+module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp };
