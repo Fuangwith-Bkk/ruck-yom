@@ -1,6 +1,6 @@
 {
   "name": "ruck-yom",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -10,6 +10,7 @@
   "dependencies": {
     "@line/bot-sdk": "^11.1.0",
     "dotenv": "^16.4.5",
+    "express": "^5.2.1",
     "lru-cache": "^10.2.0",
     "rotating-file-stream": "^3.2.10"
   },

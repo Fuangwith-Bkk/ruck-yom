@@ -1,4 +1,5 @@
 const deviceRegistry = require('../config/deviceRegistry');
+const { DP_PROFILES } = require('../config/dpProfiles');
 const { getBangkokTimestamp, getBangkokTime } = require('../utils/dateTime');
 
 class SensorNormalizer {
@@ -8,7 +9,15 @@ class SensorNormalizer {
     }
 
     const deviceId = rawMessage.devId;
-    const deviceName = deviceRegistry[deviceId] || `Sensor (${deviceId.substring(0, 6)}...)`;
+    const device = deviceRegistry[deviceId];
+    const deviceName = device?.name || `Sensor (${deviceId.substring(0, 6)}...)`;
+    // Only DP codes defined in this specific device's profile are ever
+    // interpreted — never matched globally across all devices. See
+    // src/config/dpProfiles.js for why (the same DP code name can mean
+    // different things in different Tuya categories, and the same concept
+    // can use different code names across categories).
+    const profile = device?.dpProfile ? DP_PROFILES[device.dpProfile] : null;
+
     const eventDate = new Date(rawMessage.eventTime || Date.now());
     const timestamp = getBangkokTimestamp(eventDate);
     // Short HH:MM:ss, used for per-line stamps in a consolidated chain
@@ -25,121 +34,32 @@ class SensorNormalizer {
     for (const dp of rawMessage.status) {
       const { code, value } = dp;
 
-      if (code === 'doorcontact_state') {
-        const isOpened = value === true || value === 'true';
+      const resolve = profile && profile[code];
+      if (!resolve) {
+        // Unregistered device (no dpProfile), or a DP code this device's
+        // profile doesn't define — surface it for triage rather than
+        // guessing at a meaning from another category.
         events.push({
           deviceId,
           deviceName,
-          eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
+          eventType: 'UNKNOWN_EVENT',
+          rawPayload: JSON.stringify(dp),
           timestamp,
           time
         });
         continue;
       }
 
-      // Some door/window sensors (Tuya's "qt"/Others category) report
-      // contact state under the generic `switch` code instead of
-      // `doorcontact_state`, with the same true=open polarity — confirmed
-      // 2026-08-14 against a real device (ประตูห้องพ่อ) by cross-referencing
-      // production events against the Smart Life app's History log.
-      // Distinct from `switch_1` below, which is a relay/light, not a door.
-      if (code === 'switch') {
-        const isOpened = value === true || value === 'true';
-        events.push({
-          deviceId,
-          deviceName,
-          eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
-          timestamp,
-          time
-        });
-        continue;
-      }
+      const result = resolve(value);
+      // null means routine telemetry (healthy battery, motion clear, etc.)
+      // — intentionally not an event (Section 9 DoD).
+      if (!result) continue;
 
-      if (code === 'pir') {
-        const isMotion = value === 'pir' || value === true || value === 'true';
-        // Only the motion-detected transition is alert-worthy (Section 9 DoD).
-        // "Clear" is routine telemetry — PIR sensors can fire it very
-        // frequently while idle, unlike a door's closed transition — so it
-        // must not be emitted as an event, matching the water/battery
-        // pattern below.
-        if (isMotion) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'MOTION_DETECTED',
-            timestamp,
-            time
-          });
-        }
-        continue;
-      }
-
-      if (code === 'switch_1') {
-        const isOn = value === true || value === 'true';
-        events.push({
-          deviceId,
-          deviceName,
-          eventType: isOn ? 'RELAY_ON' : 'RELAY_OFF',
-          timestamp,
-          time
-        });
-        continue;
-      }
-
-      if (code === 'watersensor_state') {
-        const isAlarm = value === 'alarm' || value === true || value === 'true';
-        // Only the alarm transition is alert-worthy. A "normal"/cleared
-        // reading is routine telemetry, not an event — do NOT emit
-        // anything for it (previously fell through to UNKNOWN_EVENT and
-        // spammed the LINE group on every routine status poll).
-        if (isAlarm) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'WATER_LEAK',
-            timestamp,
-            time
-          });
-        }
-        continue;
-      }
-
-      if ((code === 'battery_percentage' || code === 'battery') && typeof value === 'number') {
-        // Only low-battery is alert-worthy; a healthy reading is routine
-        // telemetry and must not be emitted as an event.
-        if (value < 20) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'BATTERY_LOW',
-            batteryLevel: value,
-            timestamp,
-            time
-          });
-        }
-        continue;
-      }
-
-      if (code === 'alarm_switch') {
-        const isOn = value === true || value === 'true';
-        events.push({
-          deviceId,
-          deviceName,
-          eventType: isOn ? 'ALARM_ON' : 'ALARM_OFF',
-          timestamp,
-          time
-        });
-        continue;
-      }
-
-      // Any other DP code is genuinely unrecognized — surface it once per
-      // occurrence so it's visible for triage, but this should be rare in
-      // steady state, not the default outcome of routine telemetry.
       events.push({
         deviceId,
         deviceName,
-        eventType: 'UNKNOWN_EVENT',
-        rawPayload: JSON.stringify(dp),
+        eventType: result.eventType,
+        ...result.extra,
         timestamp,
         time
       });

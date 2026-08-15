@@ -22,6 +22,12 @@ listed here is wired into the app; see the **Handled** column per category.
 - Adding a category: paste the raw Tuya table under a new `##` section below,
   in the same Code / Type / Values / Handled shape as the existing ones, and
   add a Change log entry.
+- **Each `##` category code here is also a key in `src/config/dpProfiles.js`**
+  (Phase 2, 2026-08-15) — that file is the actual runtime dispatch table;
+  this doc is the reference/rationale behind it. A device is registered in
+  `deviceRegistry.json` with a `dpProfile` naming one of these category
+  codes, so its DPs are only ever interpreted against that specific
+  category's table, never matched globally across devices.
 
 ## Legend
 
@@ -34,6 +40,12 @@ listed here is wired into the app; see the **Handled** column per category.
 ---
 
 ## `tdq` — Breaker
+
+Confirmed via Tuya IoT Platform Product Category (2026-08-15) for the real
+registered device หลอดไฟยาวหน้าบ้าน (Product Name: BSD17-1). Actually a
+relay-controlled light in this deployment, not a literal circuit breaker —
+`tdq` is Tuya's generic relay/switch category name, used here for the front
+yard light.
 
 ### Instruction Set / Status Set
 *(Tuya lists these identically for this category)*
@@ -51,7 +63,9 @@ listed here is wired into the app; see the **Handled** column per category.
 ## `sos` — Emergency Button
 
 **Remark:** vendor describes this unit as a *"Security Remote with 4 buttons
-(home, arm, disarm, and sos)"*.
+(home, arm, disarm, and sos)"*. Confirmed via Tuya IoT Platform Product
+Category (2026-08-15) for the real registered device รีโมท (Product Name:
+R7054-V2 Security remote control).
 
 ### Status Set
 
@@ -59,17 +73,36 @@ listed here is wired into the app; see the **Handled** column per category.
 |---|---|---|---|
 | `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ⚠️ |
 | `sos` | Enum | `sos` | ⚠️ |
+| `arm` | Enum | `arm` (single-value range) | ⚠️ not commandable |
+| `disarmed` | Enum | `disarmed` (single-value range) | ⚠️ not commandable |
+| `home` | Enum | `home` (single-value range) | ⚠️ not commandable |
 
-> ❓ **Unresolved:** only a single `sos` enum is documented, but the Remark
-> claims 4 physical buttons (home/arm/disarm/sos). Either this category page
-> is the wrong one for the actual hardware, or the real device's schema
-> differs from the generic template shown here. **Do not build alert logic
-> around `home`/`arm`/`disarm` DPs until this is confirmed** against the real
-> device ID via the Tuya Cloud API — they may not exist.
+> ✅ **Resolved (2026-08-15):** switching this product from Standard
+> Instruction to DP Instruction mode on the Tuya IoT Platform confirmed all
+> 4 buttons really do exist as Enum DPs (`arm`, `disarmed`, `home`, `sos`,
+> each a single-value-range enum). **However, they cannot be commanded from
+> the cloud** — `POST /v1.0/devices/{id}/commands` with any of these codes
+> returns `2008 command or value not support`. Root cause: this is a
+> battery-powered/sleepy Zigbee end device — it can transmit its own button
+> presses upstream, but Zigbee end devices of this kind generally can't
+> receive cloud-initiated downlink commands. Confirmed live against the real
+> device.
+>
+> **Resolution:** เฝ้าบ้าน/ไปพัก (arm/disarm) are implemented by triggering
+> the user's pre-built Tap-to-Run **Scenes** instead
+> (`POST /v2.0/cloud/scene/rule/{rule_id}/actions/trigger`,
+> `src/services/tuyaRestClient.js`'s `triggerScene()`), not by commanding
+> this device directly. The Scenes replicate the same "Then" actions the
+> physical remote buttons would trigger. Confirmed live end-to-end via LINE
+> on 2026-08-15.
 
 ---
 
 ## `pir` — Motion Detector
+
+Confirmed via Tuya IoT Platform Product Category (2026-08-15) for the real
+registered device คนเดินในห้องนั่งเล่น (Product Name: ZP06ZTU 人体感应 —
+human body/motion sensor).
 
 ### Status Set
 
@@ -81,6 +114,9 @@ listed here is wired into the app; see the **Handled** column per category.
 ---
 
 ## `sgbj` — Siren
+
+Confirmed via Tuya IoT Platform Product Category (2026-08-15) for the real
+registered device Alarm (Product Name: ZA03ZTU 报警器 — alarm/siren).
 
 ### Instruction Set / Status Set
 *(Tuya lists these identically for this category)*
@@ -95,7 +131,10 @@ listed here is wired into the app; see the **Handled** column per category.
 
 ## `mcs` — Contact Sensor
 
-**Remark:** door sensor.
+**Remark:** door sensor. Confirmed via Tuya IoT Platform Product Category
+(2026-08-15) for 3 real registered devices: ประตูระเบียงห้องพ่อ, ประตูครัว,
+ประตูหน้าบ้าน (Product Name: Zigbee门磁（磁阻开关) — Zigbee door magnetic
+contact switch).
 
 ### Status Set
 
@@ -117,6 +156,13 @@ previously suspected. `switch`'s `true=open` polarity was confirmed by
 cross-referencing a burst of production events against the Smart Life app's
 own History log (every open/close pair matched exactly).
 
+Confirmed via Tuya IoT Platform Product Category (2026-08-15) for 2 real
+registered devices: ประตูห้องป้าแสง and ประตูห้องพ่อ. Tuya's Product Type
+for this category really is generic "Others," but the actual Product Name
+is 门窗磁传感器 (door/window magnetic sensor) — so despite the unhelpful
+category label, this is genuinely a purpose-built door/window sensor, not a
+miscategorized generic device.
+
 ### Status Set
 
 | Code | Type | Values | Handled |
@@ -128,9 +174,13 @@ own History log (every open/close pair matched exactly).
 
 ## Handled elsewhere, no category entry yet
 
-- `watersensor_state` (Water Leak Sensor) — mapped in `sensorNormalizer.js` →
-  `WATER_LEAK`, but its Tuya category page hasn't been pasted into this
-  registry yet. Add it here next time it's pulled from the platform.
+- `watersensor_state` (Water Leak Sensor) — mapped in `sensorNormalizer.js`'s
+  `dpProfiles.js` table (Phase 2) → `WATER_LEAK`, under the placeholder
+  profile key `watersensor`, but its real Tuya Product Category code hasn't
+  been confirmed (no water leak sensor is owned/registered yet) and its
+  category page hasn't been pasted into this registry. Once one is added:
+  confirm the real category code via the platform, rename the `watersensor`
+  key in `dpProfiles.js` to match, and paste its raw schema here.
 
 ---
 
@@ -142,3 +192,5 @@ own History log (every open/close pair matched exactly).
 | 2026-08-14 | `qt`/`battery` confirmed via production event and marked ✅ handled (aliased to `battery_percentage` in `sensorNormalizer.js`); `qt` Remark updated to reflect the confirmed door-sensor mapping. |
 | 2026-08-14 | `qt`/`switch` polarity confirmed against Smart Life app History log and marked ✅ handled (mapped to `DOOR_OPENED`/`DOOR_CLOSED` in `sensorNormalizer.js`, same polarity as `doorcontact_state`). |
 | 2026-08-14 | `sgbj`/`alarm_switch` marked ✅ handled for both `true` and `false` (`ALARM_ON`/`ALARM_OFF` in `sensorNormalizer.js`) — Boolean `{true, false}` type was already documented from the original `devices-format.md`/Tuya IoT Platform Device Debugging screen, confirming `false` is a real "off" state, not inferred. |
+| 2026-08-15 | Every category code confirmed directly against its real registered device's Product Category on the Tuya IoT Platform (`mcs`, `qt`, `tdq`, `sgbj`, `pir`, `sos`) — Remarks updated with the exact Product Names. `sensorNormalizer.js` rewritten to dispatch per-device via `src/config/dpProfiles.js`, keyed by these exact category codes, instead of matching DP codes globally — closes a real ambiguity risk (e.g. `tdq`'s `switch_1` and a hypothetical future category reusing the same code name for something else could previously have been cross-interpreted). |
+| 2026-08-15 | `sos`'s `arm`/`disarmed`/`home` DPs confirmed real (Enum, single-value range) after switching the product to DP Instruction mode — but confirmed **not commandable** from the cloud (`2008 command or value not support`), since this is a battery-powered Zigbee end device that can't receive downlink commands. เฝ้าบ้าน/ไปพัก resolved instead by triggering pre-built Tap-to-Run Scenes (`triggerScene()` in `tuyaRestClient.js`) — confirmed working live via LINE. |

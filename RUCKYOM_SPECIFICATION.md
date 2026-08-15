@@ -42,11 +42,17 @@
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 2: Interactive Webhook & Status Querying                                  │
-│ • Express `/webhook` server receiving LINE chat events                         │
-│ • Thai Command Router (`/status`, `/arm`, `/disarm` or `/สถานะ`)                 │
-│ • Dynamic batch device status querying via Tuya REST OpenAPI endpoints          │
-│ • Rich Thai Flex Messages and Interactive Layout Cards                          │
+│ PHASE 2: Interactive Status Query & Device Control (Increments 1-2 shipped)     │
+│ • Express `/webhook` server receiving LINE chat events, signature-verified      │
+│ • Tap-only device menus (Quick Reply/Flex) — never requires typing a device     │
+│   name/ID; argument-less commands (`/status`, `เมนู`) are shortcuts into the     │
+│   same menu, not a device-naming command syntax                                 │
+│ • Live device status query via a hand-rolled Tuya REST OpenAPI client           │
+│ • Device control — relay/alarm on-off, each behind a Yes/No confirm step        │
+│ • เฝ้าบ้าน/ไปพัก (arm/disarm) — triggers pre-built Tuya Tap-to-Run Scenes,        │
+│   not a direct device command (the security remote is a sleepy Zigbee end       │
+│   device that can't receive downlink commands — see Section 8.13)               │
+│ • Not yet built: breaker timer preset, `/history` device history                │
 └─────────────────────────┬───────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -72,7 +78,10 @@
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-validated local POC scripts (`./poc/all-status.js`, `./poc/get-group-id.js`, `./poc/index.js`, `./poc/tuya-listener.js`).
+Note: `./poc/*` scripts referenced in earlier drafts of this document were
+never actually committed to this repo — confirmed absent (2026-08-15) when
+building Phase 2's Tuya REST client, which had no in-repo reference to draw
+from and was built fresh against Tuya's documented signing scheme instead.
 
 ---
 
@@ -145,15 +154,17 @@ yarn-debug.log*
 ```ini
 # System Configuration
 NODE_ENV=development
-PORT=3000                          # Unused until Phase 2 (Express webhook server)
+PORT=3000                          # Phase 2: Express webhook server listen port. Required.
 TIMEZONE=Asia/Bangkok
 TUYA_PULSAR_MAX_RETRIES=50         # Was hardcoded in app.js; externalized for tunability
 
 # Tuya Cloud OpenAPI Credentials
-TUYA_BASE_URL=https://openapi-sg.iotbing.com
+TUYA_BASE_URL=https://openapi-sg.iotbing.com   # Phase 2: used by tuyaRestClient.js. Required.
 TUYA_ACCESS_ID=your_tuya_access_id
 TUYA_ACCESS_SECRET=your_tuya_access_secret
-TUYA_SMART_LIFE_UID=your_smart_life_uid   # Unused until Phase 2 (REST device status queries)
+TUYA_SMART_LIFE_UID=your_smart_life_uid   # Not read by any current code path — used manually (via the Tuya API Explorer's "Query Home List") to look up the space_id needed to find the scene rule_ids below. Kept scaffolded for a possible future auto-discovery feature.
+TUYA_ARM_SCENE_ID=your_arm_scene_rule_id       # Tap-to-Run scene rule_id for เฝ้าบ้าน — find via Cloud > API Explorer > Scene Linkage Rules > Query Linkage Rules (space_id = your home's id), filter type="scene". Optional — เฝ้าบ้าน/ไปพัก hide themselves from the menu if unset.
+TUYA_DISARM_SCENE_ID=your_disarm_scene_rule_id # Same, for ไปพัก.
 
 # Tuya Pulsar Message Service
 TUYA_MQ_URL=wss://mqe-sg.iotbing.com:8285/
@@ -161,7 +172,7 @@ TUYA_MQ_ENV=PROD
 
 # LINE Messaging API Credentials
 LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token
-LINE_CHANNEL_SECRET=your_line_channel_secret   # Unused until Phase 2 (webhook signature verification)
+LINE_CHANNEL_SECRET=your_line_channel_secret   # Phase 2: verifies incoming webhook signatures. Required — get the real value from the LINE Developers Console, not this placeholder.
 LINE_GROUP_ID=your_target_line_group_id
 LINE_BOT_NAME=รักยม                            # Used as {{botName}} in alert templates. Optional, defaults to รักยม.
 
@@ -195,9 +206,11 @@ ruck-yom/
 ├── src/
 │   ├── config/
 │   │   ├── environment.js              # Boot validation for required env vars
-│   │   ├── deviceRegistry.js           # Loads deviceRegistry.json, mapping Tuya device_id to human Thai names
-│   │   ├── deviceRegistry.json         # Actual device_id -> name map (Untracked — real device IDs, like .env)
-│   │   └── deviceRegistry.example.json # Template committed to Git (shape reference, no real device IDs)
+│   │   ├── deviceRegistry.js           # Loads deviceRegistry.json
+│   │   ├── deviceRegistry.json         # Actual device_id -> {name, category, dpProfile} map (Untracked — real device IDs, like .env)
+│   │   ├── deviceRegistry.example.json # Template committed to Git (shape reference, no real device IDs)
+│   │   ├── dpProfiles.js               # [Phase 2] Per-Tuya-category DP code -> event resolver table, keyed by dpProfile
+│   │   └── deviceCategories.js         # [Phase 2] User-facing category -> {label, emoji, menu/action flags} table
 │   ├── contracts/
 │   │   ├── IDeduplicator.js        # Deduplication contract interface [Phase 1]
 │   │   ├── IStateManager.js        # System security mode contract [Phase 3 — interface only, see note below]
@@ -208,17 +221,22 @@ ruck-yom/
 │   │       ├── memoryStateManager.js  # In-memory security state stub [Phase 3 — NOT scaffolded in Phase 1]
 │   │       └── memoryQuotaTracker.js  # In-memory push quota stub [Phase 3 — NOT scaffolded in Phase 1]
 │   ├── services/
-│   │   ├── tuyaPulsarListener.js   # Pulsar WS connection manager
-│   │   ├── sensorNormalizer.js     # Maps Tuya DP codes to event schema
+│   │   ├── sensorNormalizer.js     # Maps Tuya DP codes to event schema, via dpProfiles.js (data-driven, not hardcoded per-code branches)
 │   │   ├── templateEngine.js       # Renders localized Thai JSON templates
-│   │   └── lineMessaging.js        # LINE messagingApi wrapper
+│   │   ├── lineMessaging.js        # LINE messagingApi wrapper (push + reply)
+│   │   ├── eventCorrelator.js      # Consolidates bursts of events into one LINE message; see Section 8.8
+│   │   ├── tuyaRestClient.js       # [Phase 2] Hand-rolled Tuya OpenAPI client — token minting, signed status queries, device commands, and Tap-to-Run Scene triggering
+│   │   └── interactionRouter.js    # [Phase 2] Webhook event dispatch: trigger keyword/command -> menu -> status/control/arm-disarm
 │   ├── templates/
-│   │   ├── securityAlerts.json     # Localized Thai message templates
-│   │   └── statusReports.json      # Status layout templates (Phase 2 placeholder)
+│   │   ├── securityAlerts.json     # Localized Thai alert message templates (Phase 1)
+│   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm), dynamic, not static JSON
+│   │   └── statusCard.js           # [Phase 2] Flex builders for a device's live status (single card + all-devices table) and Yes/No confirm prompts
 │   ├── utils/
 │   │   ├── dateTime.js             # Asia/Bangkok date-time formatter
 │   │   └── logger.js               # Console + size/day-rotated file logger, bounded by LOG_MAX_FILES
-│   └── app.js                      # Application bootstrap & event loop
+│   ├── webhook/
+│   │   └── server.js               # [Phase 2] Express app: LINE signature-verified /webhook route
+│   └── app.js                      # Application bootstrap — Pulsar client + webhook server
 └── tuya-pulsar-ws-node/            # Compiled local Pulsar SDK package
     ├── dist/                       # Compiled JavaScript output
     └── package.json
@@ -230,23 +248,41 @@ ruck-yom/
 
 ## 6. Sensor DP Code Mapping Schema
 
-| Device Category | Tuya DP Code (`code`) | Payload Value (`value`) | Event Key (`eventType`) | Default Thai Event Text |
+As of the `dpProfiles.js` refactor (Section 8.11), DP interpretation is
+**per-device, not global** — a device is registered in `deviceRegistry.json`
+with a `dpProfile` naming exactly one Tuya Product Category, and only DP
+codes defined for *that* profile are ever interpreted for it. This matters
+because the same DP code name can mean different things in different
+categories (`switch_1` is a relay in `tdq`, never a door), and the same
+concept can use different code names across categories (`mcs` reports door
+state as `doorcontact_state`; `qt` reports the identical concept as
+`switch`). The table below is a flattened summary for quick reference — the
+authoritative source is `dpProfiles.js` itself, cross-referenced with
+`TUYA_DEVICE_DP_REGISTRY.md`'s raw per-category schemas.
+
+| `dpProfile` | Tuya Category | DP Code (`code`) | Value | `eventType` |
 | --- | --- | --- | --- | --- |
-| **Door Contact Sensor** | `doorcontact_state` or `switch` | `true` | `DOOR_OPENED` | 🚪 เปิดประตูแล้ว |
-|  | `doorcontact_state` or `switch` | `false` | `DOOR_CLOSED` | 🚪 ปิดประตูแล้ว |
-| **PIR Motion Sensor** | `pir` | `"pir"` / `true` | `MOTION_DETECTED` | 🏃 ตรวจพบการเคลื่อนไหว |
-| **Water Leak Sensor** | `watersensor_state` | `"alarm"` / `true` | `WATER_LEAK` | 💦 ตรวจพบน้ำรั่วซึม |
-| **Battery Level** | `battery_percentage` or `battery` | `number` (0–100) | `BATTERY_LOW` | ⚠️ แบตเตอรี่ต่ำ (< 20%) |
-| **Relay Switch** | `switch_1` | `true` | `RELAY_ON` | 🔌 เปิดสวิตช์แล้ว |
-|  | `switch_1` | `false` | `RELAY_OFF` | 🔌 ปิดสวิตช์แล้ว |
-| **Siren** (`sgbj`) | `alarm_switch` | `true` | `ALARM_ON` | !!! สัญญาณเตือนในบ้านดังครับ |
-|  | `alarm_switch` | `false` | `ALARM_OFF` | เรียบร้อยครับ สัญญาณเตือนหยุดแล้ว ปลอดภัยแล้วนะครับ |
+| `mcs` | Contact Sensor | `doorcontact_state` | `true` / `false` | `DOOR_OPENED` / `DOOR_CLOSED` |
+| `mcs` | Contact Sensor | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< 20%) |
+| `qt` | Others (door/window magnetic sensor) | `switch` | `true` / `false` | `DOOR_OPENED` / `DOOR_CLOSED` |
+| `qt` | Others (door/window magnetic sensor) | `battery` | `number` | `BATTERY_LOW` (< 20%) |
+| `pir` | Motion Detector | `pir` | `"pir"` / `"none"` | `MOTION_DETECTED` / *(silent)* |
+| `pir` | Motion Detector | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< 20%) |
+| `tdq` | Breaker | `switch_1` | `true` / `false` | `RELAY_ON` / `RELAY_OFF` |
+| `sgbj` | Siren | `alarm_switch` | `true` / `false` | `ALARM_ON` / `ALARM_OFF` |
+| `watersensor`* | Water Leak Sensor | `watersensor_state` | `"alarm"` / `"normal"` | `WATER_LEAK` / *(silent)* |
+| `sos` | Emergency Button | *(none — unresolved, see `TUYA_DEVICE_DP_REGISTRY.md`)* | — | *(always `UNKNOWN_EVENT`)* |
 
-Routine/non-alert telemetry — PIR `pir` = `"none"`/`false` (motion clear), water sensor `"normal"`, and battery ≥ 20% — is intentionally **not** mapped to an event and produces no LINE message (see Section 9 DoD). `sensorNormalizer.transform()` returns `null` for these rather than an `UNKNOWN_EVENT`. `alarm_switch = false` used to follow this same pattern, but as of `ALARM_OFF` it's now a real event (see Section 7) — anyone alerted by `ALARM_ON` gets a corresponding "all clear" message once the siren stops, rather than being left to check the Smart Life app.
+\* `watersensor` is a placeholder profile key — no device is registered
+under it yet, and the real Tuya Product Category code hasn't been confirmed
+against an actual device. Rename the key once one is added and confirmed.
 
-Some devices report battery under DP code `battery` instead of `battery_percentage` (observed in production on a door sensor) — `sensorNormalizer.js` treats both codes identically, same `<20%` threshold. Before this alias was added, `battery` fell through to `UNKNOWN_EVENT` and spammed the group on every routine reading, including healthy ones.
-
-The same door sensor also reports contact state under DP code `switch` instead of `doorcontact_state`, same `true = open` polarity — confirmed by cross-referencing production events against the Smart Life app's History log (see `TUYA_DEVICE_DP_REGISTRY.md`, `qt` category). `switch` is distinct from `switch_1` (relay/light control, Section 6 table above) — same code name pattern as the `battery`/`battery_percentage` aliasing, different DP.
+Routine/non-alert telemetry — PIR `"none"` (motion clear), water sensor
+`"normal"`, and battery ≥ 20% — intentionally returns `null` from its
+resolver rather than an event, producing no LINE message (see Section 9
+DoD). A DP code not listed for a device's profile (including a device with
+no `dpProfile` registered at all) becomes `UNKNOWN_EVENT` — never guessed at
+using another profile's meaning.
 
 Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside the full `timestamp` (`DD/MM/YY HH:MM:ss`) — `time` is only used by the Event Correlator (Section 8.8) for the per-line stamps inside a consolidated chain message; every standalone message still renders the full `timestamp`.
 
@@ -288,7 +324,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ```json
 {
   "name": "ruck-yom",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -298,6 +334,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
   "dependencies": {
     "@line/bot-sdk": "^11.1.0",
     "dotenv": "^16.4.5",
+    "express": "^5.2.1",
     "lru-cache": "^10.2.0",
     "rotating-file-stream": "^3.2.10"
   },
@@ -311,16 +348,18 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ### 8.2 Environment Schema Validator (`src/config/environment.js`)
 
 ```javascript
-// Phase 1 scope only. TUYA_SMART_LIFE_UID, LINE_CHANNEL_SECRET, and PORT
-// are declared in .env.example for schema stability but are not required
-// until Phase 2 — add them here when that phase begins, not before,
-// or local dev will fail boot on vars the current code never reads.
 const REQUIRED_ENV = [
   'TUYA_ACCESS_ID',
   'TUYA_ACCESS_SECRET',
   'TUYA_MQ_URL',
   'LINE_CHANNEL_ACCESS_TOKEN',
-  'LINE_GROUP_ID'
+  'LINE_GROUP_ID',
+  // Phase 2 (interactive status query & control): TUYA_BASE_URL is used by
+  // tuyaRestClient.js; LINE_CHANNEL_SECRET verifies incoming webhook
+  // signatures; PORT is the webhook Express server's listen port.
+  'TUYA_BASE_URL',
+  'LINE_CHANNEL_SECRET',
+  'PORT'
 ];
 
 function validateEnv() {
@@ -432,8 +471,19 @@ module.exports = LRUDeduplicator;
 
 ### 8.5 Sensor Event Normalizer (`src/services/sensorNormalizer.js`)
 
+Rewritten (2026-08-15) from a monolithic `if (code === ...)` chain matching
+DP codes globally to a data-driven dispatch through `dpProfiles.js` (Section
+8.11), keyed by each device's registered `dpProfile`. The old global-match
+approach had a real correctness gap: `qt`'s `switch` DP and `tdq`'s
+`switch_1` DP are unrelated concepts (door state vs. relay control) that
+happen to use similar code names, and nothing prevented a device from being
+misread according to the wrong category's meaning. Per-device profile
+lookup closes that gap — see `dpProfiles.js`'s own comments for the full
+rationale.
+
 ```javascript
 const deviceRegistry = require('../config/deviceRegistry');
+const { DP_PROFILES } = require('../config/dpProfiles');
 const { getBangkokTimestamp, getBangkokTime } = require('../utils/dateTime');
 
 class SensorNormalizer {
@@ -443,7 +493,15 @@ class SensorNormalizer {
     }
 
     const deviceId = rawMessage.devId;
-    const deviceName = deviceRegistry[deviceId] || `Sensor (${deviceId.substring(0, 6)}...)`;
+    const device = deviceRegistry[deviceId];
+    const deviceName = device?.name || `Sensor (${deviceId.substring(0, 6)}...)`;
+    // Only DP codes defined in this specific device's profile are ever
+    // interpreted — never matched globally across all devices. See
+    // src/config/dpProfiles.js for why (the same DP code name can mean
+    // different things in different Tuya categories, and the same concept
+    // can use different code names across categories).
+    const profile = device?.dpProfile ? DP_PROFILES[device.dpProfile] : null;
+
     const eventDate = new Date(rawMessage.eventTime || Date.now());
     const timestamp = getBangkokTimestamp(eventDate);
     // Short HH:MM:ss, used for per-line stamps in a consolidated chain
@@ -460,121 +518,32 @@ class SensorNormalizer {
     for (const dp of rawMessage.status) {
       const { code, value } = dp;
 
-      if (code === 'doorcontact_state') {
-        const isOpened = value === true || value === 'true';
+      const resolve = profile && profile[code];
+      if (!resolve) {
+        // Unregistered device (no dpProfile), or a DP code this device's
+        // profile doesn't define — surface it for triage rather than
+        // guessing at a meaning from another category.
         events.push({
           deviceId,
           deviceName,
-          eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
+          eventType: 'UNKNOWN_EVENT',
+          rawPayload: JSON.stringify(dp),
           timestamp,
           time
         });
         continue;
       }
 
-      // Some door/window sensors (Tuya's "qt"/Others category) report
-      // contact state under the generic `switch` code instead of
-      // `doorcontact_state`, with the same true=open polarity — confirmed
-      // 2026-08-14 against a real device (ประตูห้องพ่อ) by cross-referencing
-      // production events against the Smart Life app's History log.
-      // Distinct from `switch_1` below, which is a relay/light, not a door.
-      if (code === 'switch') {
-        const isOpened = value === true || value === 'true';
-        events.push({
-          deviceId,
-          deviceName,
-          eventType: isOpened ? 'DOOR_OPENED' : 'DOOR_CLOSED',
-          timestamp,
-          time
-        });
-        continue;
-      }
+      const result = resolve(value);
+      // null means routine telemetry (healthy battery, motion clear, etc.)
+      // — intentionally not an event (Section 9 DoD).
+      if (!result) continue;
 
-      if (code === 'pir') {
-        const isMotion = value === 'pir' || value === true || value === 'true';
-        // Only the motion-detected transition is alert-worthy (Section 9 DoD).
-        // "Clear" is routine telemetry — PIR sensors can fire it very
-        // frequently while idle, unlike a door's closed transition — so it
-        // must not be emitted as an event, matching the water/battery
-        // pattern below.
-        if (isMotion) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'MOTION_DETECTED',
-            timestamp,
-            time
-          });
-        }
-        continue;
-      }
-
-      if (code === 'switch_1') {
-        const isOn = value === true || value === 'true';
-        events.push({
-          deviceId,
-          deviceName,
-          eventType: isOn ? 'RELAY_ON' : 'RELAY_OFF',
-          timestamp,
-          time
-        });
-        continue;
-      }
-
-      if (code === 'watersensor_state') {
-        const isAlarm = value === 'alarm' || value === true || value === 'true';
-        // Only the alarm transition is alert-worthy. A "normal"/cleared
-        // reading is routine telemetry, not an event — do NOT emit
-        // anything for it (previously fell through to UNKNOWN_EVENT and
-        // spammed the LINE group on every routine status poll).
-        if (isAlarm) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'WATER_LEAK',
-            timestamp,
-            time
-          });
-        }
-        continue;
-      }
-
-      if ((code === 'battery_percentage' || code === 'battery') && typeof value === 'number') {
-        // Only low-battery is alert-worthy; a healthy reading is routine
-        // telemetry and must not be emitted as an event.
-        if (value < 20) {
-          events.push({
-            deviceId,
-            deviceName,
-            eventType: 'BATTERY_LOW',
-            batteryLevel: value,
-            timestamp,
-            time
-          });
-        }
-        continue;
-      }
-
-      if (code === 'alarm_switch') {
-        const isOn = value === true || value === 'true';
-        events.push({
-          deviceId,
-          deviceName,
-          eventType: isOn ? 'ALARM_ON' : 'ALARM_OFF',
-          timestamp,
-          time
-        });
-        continue;
-      }
-
-      // Any other DP code is genuinely unrecognized — surface it once per
-      // occurrence so it's visible for triage, but this should be rare in
-      // steady state, not the default outcome of routine telemetry.
       events.push({
         deviceId,
         deviceName,
-        eventType: 'UNKNOWN_EVENT',
-        rawPayload: JSON.stringify(dp),
+        eventType: result.eventType,
+        ...result.extra,
         timestamp,
         time
       });
@@ -641,6 +610,18 @@ class LineMessagingService {
     await this.client.pushMessage({
       to: this.groupId,
       messages: [{ type: 'text', text }]
+    });
+  }
+
+  // For responding to an incoming webhook event (Phase 2 interactive menu).
+  // Uses the event's replyToken instead of pushMessage's fixed groupId — it
+  // doesn't count against the push-message quota and works in whichever
+  // chat (group or 1:1) the triggering event came from. replyToken expires
+  // ~1 minute after the event, so this must be called promptly.
+  async replyMessage(replyToken, messages) {
+    await this.client.replyMessage({
+      replyToken,
+      messages: Array.isArray(messages) ? messages : [messages]
     });
   }
 }
@@ -804,6 +785,7 @@ const SensorNormalizer = require('./services/sensorNormalizer');
 const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
+const { createWebhookServer } = require('./webhook/server');
 const logger = require('./utils/logger');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
@@ -833,9 +815,9 @@ const client = new TuyaWebsocket({
   }
 });
 
-// SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example
-// and poc/tuya-listener.js. The device event itself is nested under
-// message.payload.data (devId, status), not on message directly.
+// SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example.
+// The device event itself is nested under message.payload.data (devId,
+// status), not on message directly.
 client.message(async (ws, message) => {
   try {
     // 1. Always ACK incoming message to prevent infinite Pulsar retry loops
@@ -883,6 +865,15 @@ client.error((wsOrErr, maybeErr) => {
 });
 
 client.start();
+
+// Phase 2: interactive status query webhook, runs alongside the Pulsar
+// client above. Independent of it — a webhook failure doesn't affect
+// Phase 1 alerting, and vice versa.
+const webhookApp = createWebhookServer();
+const port = process.env.PORT || 3000;
+webhookApp.listen(port, () => {
+  logger.info(`Webhook server listening on port ${port}.`);
+});
 
 ```
 
@@ -1032,7 +1023,1428 @@ concern, not something `.env` can control.
 
 ---
 
-## 9. Phase 1 Definition of Done
+### 8.11 Device DP Profiles & Categories (`src/config/dpProfiles.js`, `src/config/deviceCategories.js`)
+
+Two config tables added for Phase 2, on different axes (Section 6 explains
+the distinction in full). `dpProfiles.js` is per-Tuya-category and drives
+alert interpretation (Phase 1 `sensorNormalizer.js`, Section 8.5).
+`deviceCategories.js` is the coarser, user-facing grouping that drives the
+Phase 2 tap-menu — it has no effect on alerting.
+
+```javascript
+// Declarative DP interpretation table, keyed by Tuya Product Category code
+// (the same codes used as section headers in TUYA_DEVICE_DP_REGISTRY.md —
+// `mcs`, `qt`, `tdq`, `sgbj`, `pir`, ...). Each device in deviceRegistry.json
+// is registered with a `dpProfile` naming exactly one of these keys, so
+// sensorNormalizer.js interprets a DP code only against the profile that
+// specific device is known to use — never globally across all devices.
+//
+// This matters because different categories reuse the same DP code name for
+// different meanings (`tdq`'s `switch_1` is a relay; a door sensor's state
+// is never `switch_1`) — and, more subtly, the same *concept* can appear
+// under different code names per category (`mcs` reports door state as
+// `doorcontact_state`; `qt` reports the identical concept as `switch`).
+// Global code matching can't safely distinguish either case; per-device
+// profile lookup can.
+//
+// Adding a new device that uses an EXISTING profile here (i.e. Tuya already
+// assigns it one of these category codes) requires zero code changes — just
+// register it in deviceRegistry.json with the matching `dpProfile`. Only a
+// genuinely new Tuya category needs a new entry in this file.
+//
+// Each resolver: (value) => { eventType, extra? } | null. Returning null
+// means the reading is routine telemetry (e.g. healthy battery, motion
+// clear) and should not become an event — matches the existing Section 9 DoD
+// contract that routine telemetry produces zero LINE messages.
+
+const isTrue = (value) => value === true || value === 'true';
+
+function batteryLow(value) {
+  if (typeof value !== 'number' || value >= 20) return null;
+  return { eventType: 'BATTERY_LOW', extra: { batteryLevel: value } };
+}
+
+function doorState(value) {
+  return { eventType: isTrue(value) ? 'DOOR_OPENED' : 'DOOR_CLOSED' };
+}
+
+function relayState(value) {
+  return { eventType: isTrue(value) ? 'RELAY_ON' : 'RELAY_OFF' };
+}
+
+function alarmState(value) {
+  return { eventType: isTrue(value) ? 'ALARM_ON' : 'ALARM_OFF' };
+}
+
+function motionDetected(value) {
+  if (value !== 'pir' && !isTrue(value)) return null;
+  return { eventType: 'MOTION_DETECTED' };
+}
+
+function waterLeak(value) {
+  if (value !== 'alarm' && !isTrue(value)) return null;
+  return { eventType: 'WATER_LEAK' };
+}
+
+const DP_PROFILES = {
+  // Contact Sensor (door/window) — confirmed via Tuya IoT Platform Product
+  // Category for ประตูระเบียงห้องพ่อ, ประตูครัว, ประตูหน้าบ้าน (2026-08-15).
+  mcs: {
+    doorcontact_state: doorState,
+    battery_percentage: batteryLow
+  },
+  // "Others" category, Product Name 门窗磁传感器 (door/window magnetic
+  // sensor) — confirmed via Tuya IoT Platform for ประตูห้องป้าแสง and
+  // ประตูห้องพ่อ (2026-08-15); polarity separately confirmed against the
+  // Smart Life app's History log. Same concept as `mcs` above, different DP
+  // code names — this is exactly why profiles are per-device, not global.
+  qt: {
+    switch: doorState,
+    battery: batteryLow
+  },
+  // Breaker.
+  tdq: {
+    switch_1: relayState
+  },
+  // Siren.
+  sgbj: {
+    alarm_switch: alarmState
+  },
+  // Motion Detector.
+  pir: {
+    pir: motionDetected,
+    battery_percentage: batteryLow
+  },
+  // Water Leak Sensor — real Tuya Product Category code not yet confirmed
+  // against a registered device (none owned yet); key name is a placeholder
+  // to rename once one is added. `watersensor_state` mapping itself is
+  // carried over unchanged from the pre-dpProfiles normalizer.
+  watersensor: {
+    watersensor_state: waterLeak
+  }
+  // `sos` (Emergency Button / รีโมท) intentionally has no entry. Its
+  // arm/disarmed/home/sos Enum DPs are confirmed real (TUYA_DEVICE_DP_
+  // REGISTRY.md) but not externally commandable (battery-powered Zigbee end
+  // device — see Section 8.13 on triggerScene). Devices registered with
+  // dpProfile "sos" safely fall through to UNKNOWN_EVENT for every DP; this
+  // app never alerts on this device's own DPs, only queries/commands other
+  // devices and triggers Scenes.
+};
+
+// Increment 2 (device control): which DP code a profile's on/off toggle
+// actually writes, per profile — same rationale as DP_PROFILES itself.
+// Lives here rather than deviceCategories.js because it's a per-Tuya-category
+// fact (tdq writes switch_1; sgbj writes alarm_switch), not a user-facing
+// grouping concern. Only profiles that support a toggle action need an
+// entry; a category with no entry here just doesn't offer a toggle button
+// regardless of deviceCategories.js's `controllable` flag.
+const CONTROL_DP = {
+  tdq: 'switch_1',
+  sgbj: 'alarm_switch'
+};
+
+module.exports = { DP_PROFILES, CONTROL_DP };
+
+```
+
+```javascript
+// User-facing grouping for the Phase 2 interactive menu — a coarser axis
+// than dpProfiles.js's per-Tuya-category DP interpretation. E.g. the "door"
+// category spans both the `mcs` and `qt` dpProfiles; a family member picking
+// "ประตู/หน้าต่าง" from the menu shouldn't need to know or care which one a
+// given door actually uses. This table has no bearing on Phase 1 alerting,
+// which is driven entirely by dpProfiles.js — it only shapes what shows in
+// the tap-menu and which actions are offered per category.
+//
+// Adding a same-category device later needs zero changes here — just a
+// deviceRegistry.json entry with that `category`. Only a genuinely new
+// category needs a new entry in this table.
+//
+// `inMenu: false` categories (remote, gateway) are infrastructure/physical
+// controls with nothing meaningful for the bot to query or act on — they're
+// excluded from the top-level category menu entirely, and the menu only
+// ever lists a category if deviceRegistry.json has >=1 device registered
+// under it (built dynamically, not hardcoded — see interactionRouter.js).
+//
+// `label` is kept short deliberately: LINE Quick Reply's button `label`
+// field has a hard 20-character limit (emoji + space + label, combined) —
+// anything longer gets silently truncated mid-word by the LINE client, not
+// rejected by the API, so this only surfaces as an ugly button in testing.
+
+const DEVICE_CATEGORIES = {
+  door: {
+    label: 'ประตู/หน้าต่าง',
+    emoji: '🚪',
+    inMenu: true,
+    queryable: true,
+    controllable: false
+  },
+  motion: {
+    label: 'ความเคลื่อนไหว',
+    emoji: '🏃',
+    inMenu: true,
+    queryable: true,
+    controllable: false
+  },
+  water: {
+    label: 'น้ำรั่ว',
+    emoji: '💧',
+    inMenu: true,
+    queryable: true,
+    controllable: false
+  },
+  relay: {
+    label: 'สวิตช์ไฟ',
+    emoji: '💡',
+    inMenu: true,
+    queryable: true,
+    controllable: true,
+    // Increment 2 (device control): which actions this category exposes.
+    actions: ['toggle', 'timer']
+  },
+  alarm: {
+    label: 'สัญญาณเตือนภัย',
+    emoji: '🚨',
+    inMenu: true,
+    queryable: true,
+    controllable: true,
+    actions: ['toggle']
+  },
+  remote: {
+    label: 'รีโมท',
+    emoji: '📱',
+    inMenu: false,
+    queryable: false,
+    controllable: false
+  },
+  gateway: {
+    label: 'เกตเวย์',
+    emoji: '📡',
+    inMenu: false,
+    queryable: false,
+    controllable: false
+  }
+};
+
+module.exports = { DEVICE_CATEGORIES };
+
+```
+
+This happened during Increment 1's build — the original `motion` label
+(`เซนเซอร์ตรวจจับความเคลื่อนไหว`) was silently truncated to
+`"🏃 เซนเซอร์ตรวจจับคว"` before being shortened to fit within the limit.
+
+### 8.12 Menu & Status Card Builders (`src/templates/menuBuilders.js`, `src/templates/statusCard.js`)
+
+JS functions, not static JSON like `securityAlerts.json` — content is
+structurally dynamic (the category/device lists depend on what's actually in
+`deviceRegistry.json`, and the ดูแลบ้าน menu items only appear once scene IDs
+are configured). Postback `data` encodes the whole next navigation step as a
+plain query string (`a=devices&c=door`, `a=status&id=<deviceId>`, `a=all`,
+`a=armconfirm&mode=arm`, `a=armexec&mode=disarm`, ...) — no server-side
+session is needed; every tap is a self-contained request, parsed with
+`URLSearchParams` in `interactionRouter.js` (Section 8.14).
+
+`เมนู` opens the root `[📋 สถานะ / 🔧 จัดการ / 🏠 ดูแลบ้าน]` picker
+(`buildRootMenu()`); `/status`/`สถานะ` skip straight into the สถานะ branch's
+category picker (`buildCategoryMenu()`); `/status all`/`สถานะทั้งหมด` skip
+straight to the all-devices table; `/arm`/`เฝ้าบ้าน` and `/disarm`/`ไปพัก`
+skip straight to the arm/disarm Yes/No confirm step. `จัดการ`
+(`buildManageMenu()`) hides itself if no controllable device is registered;
+`🏠 ดูแลบ้าน` hides itself (`armDisarmAvailable()`) unless both
+`TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID` are set. Calling the bot by its
+own name (`LINE_BOT_NAME`) opens `buildGreeting()`, a friendlier entry point
+with direct shortcuts to เมนู/สถานะทั้งหมด/(เฝ้าบ้าน/ไปพัก if available).
+
+```javascript
+// Quick Reply builders for the tap-through menu flow. JS functions, not
+// static JSON like securityAlerts.json, since content is structurally
+// dynamic — the category list and device list both depend on what's
+// actually in deviceRegistry.json, not a fixed template.
+//
+// Postback `data` encodes the whole next step as a plain query string
+// (parsed with URLSearchParams in interactionRouter.js) — no server-side
+// session needed; every tap is a self-contained request.
+
+const deviceRegistry = require('../config/deviceRegistry');
+const { DEVICE_CATEGORIES } = require('../config/deviceCategories');
+
+// Only categories that are meant to appear in the menu (deviceCategories.js
+// `inMenu: true`) AND actually have >=1 device registered — so the menu
+// scales automatically as devices are added/removed, never listing an empty
+// category or one like "remote"/"gateway" that has nothing to query.
+function categoriesWithDevices() {
+  const present = new Set(Object.values(deviceRegistry).map((d) => d.category));
+  return Object.entries(DEVICE_CATEGORIES)
+    .filter(([key, cat]) => cat.inMenu && present.has(key));
+}
+
+function devicesInCategory(category) {
+  return Object.entries(deviceRegistry)
+    .filter(([, device]) => device.category === category)
+    .map(([id, device]) => ({ id, ...device }));
+}
+
+// Every registered device whose category is queryable (deviceCategories.js
+// `queryable: true`) — excludes remote/gateway, same as the category menu
+// itself. Registry order, so repeated queries return devices in a stable
+// order.
+function queryableDevices() {
+  return Object.entries(deviceRegistry)
+    .filter(([, device]) => DEVICE_CATEGORIES[device.category]?.queryable)
+    .map(([id, device]) => ({ id, ...device }));
+}
+
+// Every registered device whose category is controllable (deviceCategories.js
+// `controllable: true`) — currently relay + alarm. Feeds the จัดการ (Manage)
+// menu, a flat shortcut list skipping the category step entirely since
+// there are typically few controllable devices compared to queryable ones.
+function controllableDevices() {
+  return Object.entries(deviceRegistry)
+    .filter(([, device]) => DEVICE_CATEGORIES[device.category]?.controllable)
+    .map(([id, device]) => ({ id, ...device }));
+}
+
+// เฝ้าบ้าน/ไปพัก are available once both Tap-to-Run scene rule_ids are
+// configured (see .env.example) — trying to command the Security Remote
+// Control device directly to simulate its physical button press was tried
+// first and rejected by Tuya (a battery-powered Zigbee end device can send
+// events but can't receive downlink commands); triggering the pre-built
+// Tap-to-Run Scenes that replicate the same actions works instead.
+function armDisarmAvailable() {
+  return Boolean(process.env.TUYA_ARM_SCENE_ID && process.env.TUYA_DISARM_SCENE_ID);
+}
+
+// เมนู -> [สถานะ / จัดการ / ดูแลบ้าน] top-level router. Each branch is only
+// offered if it'd actually have something to show — จัดการ/ดูแลบ้าน hide
+// themselves automatically if there are no controllable devices / scenes
+// aren't configured yet, same "scales with the registry" pattern as the
+// rest of this file.
+function buildRootMenu() {
+  const items = [
+    {
+      type: 'action',
+      action: { type: 'postback', label: '📋 สถานะ', data: 'a=statusmenu', displayText: '📋 สถานะ' }
+    }
+  ];
+
+  if (controllableDevices().length > 0) {
+    items.push({
+      type: 'action',
+      action: { type: 'postback', label: '🔧 จัดการ', data: 'a=managemenu', displayText: '🔧 จัดการ' }
+    });
+  }
+
+  if (armDisarmAvailable()) {
+    items.push({
+      type: 'action',
+      action: { type: 'postback', label: '🏠 ดูแลบ้าน', data: 'a=house', displayText: '🏠 ดูแลบ้าน' }
+    });
+  }
+
+  return {
+    type: 'text',
+    text: 'มีอะไรให้ช่วยครับ',
+    quickReply: { items }
+  };
+}
+
+// สถานะ branch: category -> device -> status+control (reuses the same
+// buildDeviceMenu/status-card flow จัดการ also ends up at, since a
+// controllable device's status card already includes its control buttons —
+// สถานะ and จัดการ are two different *entry points* into the same view, not
+// two different views).
+function buildCategoryMenu() {
+  const categories = categoriesWithDevices();
+  const items = [
+    ...categories.map(([key, cat]) => ({
+      type: 'action',
+      action: {
+        type: 'postback',
+        label: `${cat.emoji} ${cat.label}`.slice(0, 20),
+        data: `a=devices&c=${key}`,
+        displayText: `${cat.emoji} ${cat.label}`
+      }
+    })),
+    {
+      type: 'action',
+      action: {
+        type: 'postback',
+        label: '📋 ทั้งหมด',
+        data: 'a=all',
+        displayText: '📋 เช็คสถานะทั้งหมด'
+      }
+    }
+  ];
+
+  return {
+    type: 'text',
+    text: 'เลือกหมวดหมู่อุปกรณ์ที่ต้องการเช็คสถานะครับ',
+    quickReply: { items }
+  };
+}
+
+// จัดการ branch: flat list of controllable devices only (relay + alarm
+// today), skipping the category step — there are typically few enough that
+// grouping adds a tap without adding clarity. No "ทั้งหมด" batch action:
+// "turn everything on/off at once" has no unambiguous single meaning with
+// only 2 controllable devices, so it's not offered; tapping a device here
+// reaches the same status+control card สถานะ would.
+function buildManageMenu() {
+  const devices = controllableDevices();
+
+  if (devices.length === 0) {
+    return { type: 'text', text: 'ยังไม่มีอุปกรณ์ที่จัดการผ่านนี้ได้ครับ' };
+  }
+
+  return {
+    type: 'text',
+    text: 'เลือกอุปกรณ์ที่ต้องการจัดการครับ',
+    quickReply: {
+      items: devices.map((device) => ({
+        type: 'action',
+        action: {
+          type: 'postback',
+          label: device.name.slice(0, 20),
+          data: `a=status&id=${device.id}`,
+          displayText: device.name
+        }
+      }))
+    }
+  };
+}
+
+// Triggered by typing the bot's own name — a friendly, discoverable entry
+// point (matching the ขุนทอง-style pattern researched for Phase 2) distinct
+// from เมนู itself: a short greeting plus direct shortcuts to the most
+// common actions, rather than making the user navigate เมนู -> สถานะ first.
+function buildGreeting(botName) {
+  const items = [
+    {
+      type: 'action',
+      action: { type: 'postback', label: '📋 เมนู', data: 'a=root', displayText: '📋 เมนู' }
+    },
+    {
+      type: 'action',
+      action: { type: 'postback', label: '📊 สถานะทั้งหมด', data: 'a=all', displayText: '📊 สถานะทั้งหมด' }
+    }
+  ];
+
+  if (armDisarmAvailable()) {
+    items.push(
+      {
+        type: 'action',
+        action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armconfirm&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
+      },
+      {
+        type: 'action',
+        action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+      }
+    );
+  }
+
+  return {
+    type: 'text',
+    text: `มีอะไรให้${botName}ช่วยครับ`,
+    quickReply: { items }
+  };
+}
+
+// เฝ้าบ้าน (arm) / ไปพัก (disarm) picker — reached either by tapping
+// "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก directly as a
+// shortcut (interactionRouter.js), both converging on the same confirm step
+// (buildArmDisarmConfirm) before anything is actually sent.
+function buildHouseMenu() {
+  return {
+    type: 'text',
+    text: 'เฝ้าบ้านหรือไปพักดีครับ?',
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armconfirm&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+        }
+      ]
+    }
+  };
+}
+
+// Yes/No confirm before actually triggering the arm/disarm Scene — arming or
+// disarming the whole house's security automation is at least as
+// consequential as toggling one relay/alarm, so it gets the same
+// confirm-before-act treatment as buildConfirmPrompt() below.
+function buildArmDisarmConfirm(mode) {
+  const isArm = mode === 'arm';
+  const label = isArm ? 'เฝ้าบ้าน' : 'ไปพัก';
+  return {
+    type: 'text',
+    text: `ยืนยันจะ${label}ใช่ไหมครับ?`,
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: {
+            type: 'postback',
+            label: `✅ ใช่ ${label}เลย`,
+            data: `a=armexec&mode=${mode}`,
+            displayText: `✅ ยืนยัน${label}`
+          }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '❌ ยกเลิก', data: 'a=cancel', displayText: '❌ ยกเลิก' }
+        }
+      ]
+    }
+  };
+}
+
+function buildDeviceMenu(category) {
+  const cat = DEVICE_CATEGORIES[category];
+  const devices = devicesInCategory(category);
+
+  if (!cat || devices.length === 0) {
+    return { type: 'text', text: 'ไม่พบอุปกรณ์ในหมวดนี้ครับ' };
+  }
+
+  return {
+    type: 'text',
+    text: `เลือก${cat.label}ที่ต้องการครับ`,
+    quickReply: {
+      items: devices.map((device) => ({
+        type: 'action',
+        action: {
+          type: 'postback',
+          label: device.name.slice(0, 20),
+          data: `a=status&id=${device.id}`,
+          displayText: device.name
+        }
+      }))
+    }
+  };
+}
+
+module.exports = {
+  buildRootMenu,
+  buildCategoryMenu,
+  buildDeviceMenu,
+  buildManageMenu,
+  buildHouseMenu,
+  buildArmDisarmConfirm,
+  buildGreeting,
+  queryableDevices,
+  controllableDevices,
+  armDisarmAvailable
+};
+```
+
+`statusCard.js` reads DP codes generically across the profiles a category
+can span (e.g. `door` covers both `mcs`'s `doorcontact_state` and `qt`'s
+`switch`) rather than routing through `dpProfiles.js`'s alert resolvers —
+those intentionally suppress routine readings (e.g. healthy battery returns
+`null`, since it's not alert-worthy), but a status query needs to always
+show the current battery level, healthy or not. Display and alerting are
+different jobs even when they read the same DPs.
+
+The "all devices" view (`buildAllStatusTable()`) renders as a single Flex
+Bubble with one row per device, not a Carousel — an earlier Carousel version
+required swiping through one card per device, harder to scan at a glance for
+the whole house at once. Each row stacks the device name above its
+state/battery (`buildStatusRow()`), rather than a horizontal 3-column
+layout — a long wrapped device name in a horizontal layout visually detached
+from the state/battery columns, which stayed pinned to the row's top;
+stacking avoids that regardless of name length. `buildToggleQuickReply()`
+attaches an on/off Quick Reply to a single-device status card only for
+devices whose `dpProfile` has a `CONTROL_DP` entry (`dpProfiles.js`) —
+tapping it only opens `buildConfirmPrompt()`'s Yes/No step, never sends the
+real command directly.
+
+```javascript
+// Flex Bubble builder for a single device's live status. JS function, not
+// static JSON — content (name, state, battery) is per-device and per-query.
+//
+// Reads DP codes generically across the profiles a category can span (e.g.
+// door covers both `mcs`'s doorcontact_state and `qt`'s switch) rather than
+// routing through dpProfiles.js's alert resolvers — those intentionally
+// suppress routine readings (e.g. healthy battery returns null, since it's
+// not alert-worthy), but a status query needs to always show the current
+// battery level, healthy or not. Display and alerting are different jobs
+// even when they read the same DPs.
+
+const { DEVICE_CATEGORIES } = require('../config/deviceCategories');
+const { CONTROL_DP } = require('../config/dpProfiles');
+
+function dpMapFrom(rawStatus) {
+  return Object.fromEntries((rawStatus || []).map((dp) => [dp.code, dp.value]));
+}
+
+function describeState(category, dpMap) {
+  switch (category) {
+    case 'door': {
+      const isOpen = dpMap.doorcontact_state === true || dpMap.switch === true;
+      return { stateText: isOpen ? 'เปิดอยู่' : 'ปิดอยู่', stateEmoji: isOpen ? '🔓' : '🔒' };
+    }
+    case 'relay': {
+      const isOn = dpMap.switch_1 === true;
+      return { stateText: isOn ? 'เปิดอยู่' : 'ปิดอยู่', stateEmoji: isOn ? '💡' : '⚫' };
+    }
+    case 'alarm': {
+      const isOn = dpMap.alarm_switch === true;
+      return { stateText: isOn ? 'กำลังดังอยู่' : 'ปกติ', stateEmoji: isOn ? '🚨' : '✅' };
+    }
+    case 'water': {
+      const isLeak = dpMap.watersensor_state === 'alarm' || dpMap.watersensor_state === true;
+      return { stateText: isLeak ? 'ตรวจพบน้ำรั่ว!' : 'ปกติ', stateEmoji: isLeak ? '💧' : '✅' };
+    }
+    case 'motion':
+    default:
+      return { stateText: 'พร้อมใช้งาน', stateEmoji: '🏃' };
+  }
+}
+
+// Bubble content only (no altText/message wrapper) — shared by both a
+// single-device status card and one row within the all-devices table, so
+// the two views never drift out of sync.
+function buildStatusBubble(device, rawStatus, error) {
+  const cat = DEVICE_CATEGORIES[device.category] || {};
+
+  const bodyContents = [];
+
+  if (error) {
+    bodyContents.push({
+      type: 'text',
+      text: '⚠️ เช็คสถานะไม่ได้',
+      size: 'lg',
+      weight: 'bold',
+      color: '#CC3333'
+    });
+  } else {
+    const dpMap = dpMapFrom(rawStatus);
+    const { stateText, stateEmoji } = describeState(device.category, dpMap);
+    const battery = dpMap.battery_percentage ?? dpMap.battery;
+
+    bodyContents.push({
+      type: 'text',
+      text: `${stateEmoji} ${stateText}`,
+      size: 'xl',
+      weight: 'bold'
+    });
+
+    if (typeof battery === 'number') {
+      bodyContents.push({
+        type: 'text',
+        text: `🔋 แบตเหลือ ${battery}%`,
+        size: 'sm',
+        color: '#888888',
+        margin: 'md'
+      });
+    }
+  }
+
+  return {
+    type: 'bubble',
+    header: {
+      type: 'box',
+      layout: 'vertical',
+      contents: [
+        { type: 'text', text: `${cat.emoji || ''} ${device.name}`.trim(), weight: 'bold', wrap: true }
+      ]
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      contents: bodyContents
+    }
+  };
+}
+
+// Increment 2 (device control): a toggle Quick Reply attached to the status
+// card for any device whose dpProfile has a CONTROL_DP entry — currently
+// relay (tdq) and alarm (sgbj). The button reflects the opposite of the
+// device's current on/off state so tapping it always makes sense as the
+// next action, not a fixed "toggle" whose effect depends on state the user
+// can't see at a glance. Tapping only opens a confirm prompt
+// (buildConfirmPrompt) — it never sends the real command directly.
+function buildToggleQuickReply(device, dpMap) {
+  const controlDp = CONTROL_DP[device.dpProfile];
+  if (!controlDp) return null;
+
+  const isOn = dpMap[controlDp] === true;
+  const nextCmd = isOn ? 'off' : 'on';
+  const label = isOn ? '⚪ ปิด' : '🔴 เปิด';
+
+  return {
+    items: [
+      {
+        type: 'action',
+        action: {
+          type: 'postback',
+          label,
+          data: `a=confirm&id=${device.id}&cmd=${nextCmd}`,
+          displayText: label
+        }
+      }
+    ]
+  };
+}
+
+function buildStatusCard(device, rawStatus) {
+  const dpMap = dpMapFrom(rawStatus);
+  const { stateText } = describeState(device.category, dpMap);
+
+  const message = {
+    type: 'flex',
+    altText: `${device.name}: ${stateText}`,
+    contents: buildStatusBubble(device, rawStatus)
+  };
+
+  const quickReply = buildToggleQuickReply(device, dpMap);
+  if (quickReply) message.quickReply = quickReply;
+
+  return message;
+}
+
+// Yes/No confirm step before a state-changing command actually fires —
+// required for every toggle regardless of category, so a mis-tap on the
+// status card's button can't flip a real relay/alarm without a second,
+// deliberate tap.
+function buildConfirmPrompt(device, cmd) {
+  const actionLabel = cmd === 'on' ? 'เปิด' : 'ปิด';
+  return {
+    type: 'text',
+    text: `ยืนยันจะ${actionLabel} ${device.name} ใช่ไหมครับ?`,
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: {
+            type: 'postback',
+            label: `✅ ใช่ ${actionLabel}เลย`,
+            data: `a=cmd&id=${device.id}&cmd=${cmd}`,
+            displayText: `✅ ยืนยัน${actionLabel} ${device.name}`
+          }
+        },
+        {
+          type: 'action',
+          action: {
+            type: 'postback',
+            label: '❌ ยกเลิก',
+            data: 'a=cancel',
+            displayText: '❌ ยกเลิก'
+          }
+        }
+      ]
+    }
+  };
+}
+
+// One row of the "all devices" table: name on its own full-width line
+// (wraps freely for long names without disturbing anything else), then
+// state + battery on a second line below it. An earlier version put all
+// three on one horizontal line — a long wrapped name then visually detached
+// from the state/battery columns, which stayed pinned to the row's top.
+// Stacking avoids that regardless of name length. A per-device error still
+// renders its own row rather than failing the whole table; devices that
+// succeeded still show their real status.
+function buildStatusRow(device, rawStatus, error) {
+  const cat = DEVICE_CATEGORIES[device.category] || {};
+  let stateCell = '⚠️ เช็คไม่ได้';
+  let stateColor = '#CC3333';
+  let batteryCell = '-';
+
+  if (!error) {
+    const dpMap = dpMapFrom(rawStatus);
+    const { stateText, stateEmoji } = describeState(device.category, dpMap);
+    const battery = dpMap.battery_percentage ?? dpMap.battery;
+    stateCell = `${stateEmoji} ${stateText}`;
+    stateColor = '#111111';
+    batteryCell = typeof battery === 'number' ? `${battery}%` : '-';
+  }
+
+  return {
+    type: 'box',
+    layout: 'vertical',
+    contents: [
+      {
+        type: 'text',
+        text: `${cat.emoji || ''} ${device.name}`.trim(),
+        size: 'sm',
+        weight: 'bold',
+        wrap: true
+      },
+      {
+        type: 'box',
+        layout: 'horizontal',
+        margin: 'xs',
+        contents: [
+          {
+            type: 'text',
+            text: stateCell,
+            flex: 3,
+            size: 'sm',
+            color: stateColor
+          },
+          {
+            type: 'text',
+            text: batteryCell,
+            flex: 1,
+            size: 'xs',
+            color: '#888888',
+            align: 'end'
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// `results` is an array of { device, rawStatus, error } — one entry per
+// queryable device, in registry order. Single Flex Bubble, one row per
+// device — reads as a table, no swiping needed.
+function buildAllStatusTable(results) {
+  const rows = results.flatMap(({ device, rawStatus, error }, i) => {
+    const row = buildStatusRow(device, rawStatus, error);
+    return i === 0 ? [row] : [{ type: 'separator', margin: 'md' }, row];
+  });
+
+  return {
+    type: 'flex',
+    altText: 'สถานะอุปกรณ์ทั้งหมด',
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [{ type: 'text', text: '📋 สถานะอุปกรณ์ทั้งหมด', weight: 'bold' }]
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: rows
+      }
+    }
+  };
+}
+
+module.exports = { buildStatusCard, buildAllStatusTable, buildConfirmPrompt };
+```
+
+### 8.13 Tuya REST Client (`src/services/tuyaRestClient.js`)
+
+Increment 1: token minting + read-only status queries. Increment 2 adds
+signed POST command support (`sendCommand`, relay/alarm on-off) and
+`triggerScene` (เฝ้าบ้าน/ไปพัก).
+
+`getAccessToken()` deduplicates concurrent in-flight mint requests via
+`pendingMint` — caught during testing when the "all devices" status query
+(`_replyAllStatus`, Section 8.14) fired N parallel `getDeviceStatus()` calls
+and each one independently minted its own token, since `cachedToken` was
+still `null` for all of them at the same instant. Without this, N parallel
+queries cost N token mints instead of 1.
+
+Deliberately hand-rolled rather than using the official
+`@tuya/tuya-connector-nodejs` package — evaluated and rejected (2026-08-15)
+because it hard-pins a vulnerable `axios` version (`^0.21.1`, multiple known
+CVEs: SSRF, ReDoS, prototype pollution) that npm cannot resolve past, due to
+the caret-on-0.x pin. Node 18+ (already required by this project) has
+built-in `fetch` and `crypto`, so this client needs zero new runtime
+dependencies.
+
+The Tuya Cloud API signature (`sign_method HMAC-SHA256`) was reconstructed
+from Tuya's documented signing scheme — no in-repo reference existed to copy
+from (Section 2's note on the absent `poc/` scripts). **Verified against the
+real API** during development: both token minting and a live device status
+query succeeded on the first attempt against production credentials.
+
+```javascript
+const crypto = require('crypto');
+const logger = require('../utils/logger');
+
+// Increment 1 scope: token minting + read-only status queries only. POST
+// command support (device control) is added in Increment 2.
+//
+// Deliberately hand-rolled rather than using the official
+// @tuya/tuya-connector-nodejs package — that package hard-pins a vulnerable
+// axios version (^0.21.1, multiple known CVEs: SSRF, ReDoS, prototype
+// pollution) that npm can't resolve past due to the caret-on-0.x pin. Node
+// 18+ (already required by this project) has built-in `fetch` and `crypto`,
+// so this needs zero new dependencies.
+//
+// Tuya Cloud API signature (sign_method HMAC-SHA256) — reconstructed from
+// Tuya's documented signing scheme, not copied from any existing code in
+// this repo (none existed). Verify against a real request/response before
+// relying on this in production; see RUCKYOM_SPECIFICATION.md Section 9 DoD
+// for the verification step.
+//   stringToSign = method + "\n" + sha256Hex(body) + "\n" + "" + "\n" + path
+//   signBase     = client_id + [access_token] + t + stringToSign
+//   sign         = HMAC-SHA256(signBase, client_secret), uppercase hex
+// access_token is included in signBase for every call except the initial
+// token-mint request, which has none yet.
+
+const BASE_URL = process.env.TUYA_BASE_URL;
+const ACCESS_ID = process.env.TUYA_ACCESS_ID;
+const ACCESS_SECRET = process.env.TUYA_ACCESS_SECRET;
+
+// In-memory only — a restart re-mints a token, which is cheap and avoids
+// needing Phase 3's persistence layer for something this short-lived (~2h).
+let cachedToken = null;
+// Tracks an in-flight mint request so concurrent callers (e.g. the "all
+// devices" status query firing N parallel getDeviceStatus calls) await the
+// same request instead of each independently minting their own token —
+// without this, every one of them sees cachedToken as null/expired at the
+// same instant, before any single mint has had a chance to complete.
+let pendingMint = null;
+
+function sha256Hex(input) {
+  return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
+}
+
+function hmacSha256Hex(input, secret) {
+  return crypto.createHmac('sha256', secret).update(input, 'utf8').digest('hex').toUpperCase();
+}
+
+function sign({ method, path, body, accessToken }) {
+  const t = Date.now().toString();
+  const stringToSign = [method, sha256Hex(body), '', path].join('\n');
+  const signBase = ACCESS_ID + (accessToken || '') + t + stringToSign;
+  return { t, sign: hmacSha256Hex(signBase, ACCESS_SECRET) };
+}
+
+async function request(method, path, { body, accessToken } = {}) {
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const { t, sign: signature } = sign({ method, path, body: bodyStr, accessToken });
+
+  const headers = {
+    client_id: ACCESS_ID,
+    sign: signature,
+    t,
+    sign_method: 'HMAC-SHA256',
+    'Content-Type': 'application/json'
+  };
+  if (accessToken) headers.access_token = accessToken;
+
+  logger.debug('[TUYA_REST_OUT]', method, path);
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method,
+    headers,
+    body: bodyStr || undefined
+  });
+
+  if (!res.ok) {
+    throw new Error(`Tuya API HTTP ${res.status} [${path}]`);
+  }
+
+  const json = await res.json();
+  logger.debug('[TUYA_REST_IN]', method, path, json);
+
+  if (!json.success) {
+    throw new Error(`Tuya API error [${path}]: ${json.code} ${json.msg}`);
+  }
+  return json.result;
+}
+
+// Access tokens last ~2h server-side; cache and refresh a minute early to
+// avoid a request racing right past expiry.
+async function getAccessToken() {
+  const now = Date.now();
+  if (cachedToken && cachedToken.expiresAt > now + 60000) {
+    return cachedToken.accessToken;
+  }
+
+  if (!pendingMint) {
+    pendingMint = request('GET', '/v1.0/token?grant_type=1')
+      .then((result) => {
+        cachedToken = {
+          accessToken: result.access_token,
+          expiresAt: Date.now() + result.expire_time * 1000
+        };
+        logger.info('[TUYA_REST] Minted new access token');
+        return cachedToken.accessToken;
+      })
+      .finally(() => {
+        pendingMint = null;
+      });
+  }
+
+  return pendingMint;
+}
+
+async function getDeviceStatus(deviceId) {
+  const accessToken = await getAccessToken();
+  return request('GET', `/v1.0/devices/${deviceId}/status`, { accessToken });
+}
+
+// commands: [{ code, value }, ...] — e.g. [{ code: 'alarm_switch', value: true }].
+async function sendCommand(deviceId, commands) {
+  const accessToken = await getAccessToken();
+  return request('POST', `/v1.0/devices/${deviceId}/commands`, {
+    accessToken,
+    body: { commands }
+  });
+}
+
+// Fires a Tap-to-Run Scene by its rule_id (Scene Linkage Rules API, v2.0).
+// Used for เฝ้าบ้าน/ไปพัก (arm/disarm) — an earlier attempt tried commanding
+// the Security Remote Control device directly to simulate its physical
+// button press, which Tuya rejected (error 2008, "command or value not
+// support"): that device is a battery-powered Zigbee end device that can
+// transmit button-press events but can't receive downlink commands.
+// Triggering the Tap-to-Run Scene that already replicates the same "Then"
+// actions sidesteps that entirely — Scenes are specifically meant to be
+// triggered externally, unlike a sleepy end device.
+async function triggerScene(ruleId) {
+  const accessToken = await getAccessToken();
+  return request('POST', `/v2.0/cloud/scene/rule/${ruleId}/actions/trigger`, { accessToken });
+}
+
+module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene };
+```
+
+#### Finding your `space_id` (home ID) and Scene `rule_id`s
+
+`triggerScene()` above only needs a Scene's `rule_id` at runtime — no
+`space_id` is stored or read by the app itself. The `space_id` is only
+needed once, manually, to look up the `rule_id`s of the Tap-to-Run Scenes
+you've already built in the Smart Life / Tuya Smart app (e.g. "Arm",
+"Disarm"). Both lookups use the Tuya IoT Platform's **Cloud > API Explorer**,
+signed with your own project's `TUYA_ACCESS_ID`/`TUYA_ACCESS_SECRET` (the
+Explorer signs requests for you — no credentials appear in the URL or
+response shown below).
+
+1. **Find your `space_id`** — API Explorer > *Smart Home Basic Service* >
+   *Query Home List* (`GET /v1.0/users/{uid}/homes`, needs
+   `TUYA_SMART_LIFE_UID`). Response includes each home's `home_id` — that's
+   the `space_id` used below. Match it by `name` (e.g. your house's name in
+   the app).
+
+2. **Find your Scene `rule_id`s** — API Explorer > search doesn't reliably
+   surface this; open the **"[Deprecate]Smart Home Scene Linkage"** service
+   directly instead, then its *Query Linkage Rules* endpoint:
+
+   ```
+   GET /v2.0/cloud/scene/rule?space_id={your_space_id}
+   ```
+
+   The response lists every automation *and* Tap-to-Run scene under that
+   home. Filter for `"type": "scene"` (Tap-to-Run — externally triggerable)
+   as opposed to `"type": "automation"` (condition-based, not externally
+   triggerable). Each entry's `rule_id` is what goes into
+   `TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID`.
+
+3. **Trigger it** (what `triggerScene()` does under the hood):
+
+   ```
+   POST /v2.0/cloud/scene/rule/{rule_id}/actions/trigger
+   ```
+
+   No request body needed — the Scene's own pre-configured "Then" actions
+   (e.g. enabling the arm automation, sending a notification) run exactly as
+   they would from a manual tap in the Smart Life app.
+
+### 8.14 Interaction Router (`src/services/interactionRouter.js`)
+
+Dispatches parsed webhook events: an argument-less text trigger opens the
+root/category menu; a postback tap advances to the next step (device list,
+status card, control confirm, or arm/disarm confirm). All entry points
+converge on the same handler methods — a typed command or bot-name greeting
+is just a shortcut into a step a tap would also reach (Section 2).
+
+Two state-changing actions both require an explicit two-tap Yes/No confirm
+before anything real happens: `_executeCommand` (relay/alarm on-off, only
+reachable via `a=cmd` after `a=confirm` built the prompt) and
+`_executeArmDisarm` (เฝ้าบ้าน/ไปพัก, only reachable via `a=armexec` after
+`a=armconfirm` built the prompt). `_executeArmDisarm` calls
+`tuyaRestClient.triggerScene()` (Section 8.13) with
+`TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID`, not a direct device command —
+see Section 8.13's note on why. `_replyAllStatus` queries every queryable
+device in parallel via `Promise.allSettled`, so one device's failed query
+doesn't block the others from showing real status in the same table reply.
+
+```javascript
+const deviceRegistry = require('../config/deviceRegistry');
+const { CONTROL_DP } = require('../config/dpProfiles');
+const tuyaRestClient = require('./tuyaRestClient');
+const {
+  buildRootMenu,
+  buildCategoryMenu,
+  buildDeviceMenu,
+  buildManageMenu,
+  buildHouseMenu,
+  buildArmDisarmConfirm,
+  buildGreeting,
+  queryableDevices,
+  armDisarmAvailable
+} = require('../templates/menuBuilders');
+const { buildStatusCard, buildAllStatusTable, buildConfirmPrompt } = require('../templates/statusCard');
+const logger = require('../utils/logger');
+
+const BOT_NAME = process.env.LINE_BOT_NAME || 'รักยม';
+
+// เมนู opens the root [สถานะ/จัดการ/ดูแลบ้าน] picker. /status and สถานะ are
+// more specific shortcuts straight into the สถานะ branch's category picker
+// (buildCategoryMenu), skipping the root step — matches how ALL_STATUS/ARM/
+// DISARM triggers below skip straight past their own parent menus too.
+const MENU_TRIGGERS = new Set(['เมนู']);
+const STATUS_MENU_TRIGGERS = new Set(['/status', 'สถานะ']);
+
+// Same shortcut idea as MENU_TRIGGERS, but jumps straight to the "all
+// devices" table (also reachable by tapping "📋 ทั้งหมด" in the category
+// menu) instead of the top-level menu.
+const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด']);
+
+// Shortcut straight into the arm/disarm confirm step (buildArmDisarmConfirm)
+// — also reachable via "🏠 ดูแลบ้าน" in the root menu -> buildHouseMenu.
+// Both converge on the same confirm prompt; neither skips it.
+const ARM_TRIGGERS = new Set(['/arm', 'เฝ้าบ้าน']);
+const DISARM_TRIGGERS = new Set(['/disarm', 'ไปพัก']);
+
+class InteractionRouter {
+  constructor(lineService) {
+    this.lineService = lineService;
+  }
+
+  // One LINE webhook request can carry several events; dispatch each
+  // independently so one failure doesn't block the others.
+  async handleEvents(events) {
+    await Promise.all(
+      events.map((event) =>
+        this._handleEvent(event).catch((err) =>
+          logger.error('[INTERACTION_ROUTER] Error handling event:', err)
+        )
+      )
+    );
+  }
+
+  async _handleEvent(event) {
+    if (event.type === 'message' && event.message.type === 'text') {
+      return this._handleText(event);
+    }
+    if (event.type === 'postback') {
+      return this._handlePostback(event);
+    }
+    // Follow/join/other event types: nothing to do yet.
+  }
+
+  async _handleText(event) {
+    const text = event.message.text.trim();
+
+    if (ALL_STATUS_TRIGGERS.has(text)) {
+      await this._replyAllStatus(event.replyToken);
+      return;
+    }
+
+    if (ARM_TRIGGERS.has(text)) {
+      await this._replyArmDisarmConfirm(event.replyToken, 'arm');
+      return;
+    }
+
+    if (DISARM_TRIGGERS.has(text)) {
+      await this._replyArmDisarmConfirm(event.replyToken, 'disarm');
+      return;
+    }
+
+    if (STATUS_MENU_TRIGGERS.has(text)) {
+      await this.lineService.replyMessage(event.replyToken, buildCategoryMenu());
+      return;
+    }
+
+    if (MENU_TRIGGERS.has(text)) {
+      await this.lineService.replyMessage(event.replyToken, buildRootMenu());
+      return;
+    }
+
+    // Calling the bot by its own name is a friendlier, more discoverable
+    // entry point than remembering เมนู — same pattern researched for
+    // Phase 2 (ขุนทอง-style keyword trigger).
+    if (text === BOT_NAME) {
+      await this.lineService.replyMessage(event.replyToken, buildGreeting(BOT_NAME));
+    }
+  }
+
+  async _handlePostback(event) {
+    const params = new URLSearchParams(event.postback.data);
+    const action = params.get('a');
+
+    if (action === 'devices') {
+      const category = params.get('c');
+      await this.lineService.replyMessage(event.replyToken, buildDeviceMenu(category));
+      return;
+    }
+
+    if (action === 'status') {
+      const deviceId = params.get('id');
+      await this._replyDeviceStatus(event.replyToken, deviceId);
+      return;
+    }
+
+    if (action === 'all') {
+      await this._replyAllStatus(event.replyToken);
+      return;
+    }
+
+    if (action === 'confirm') {
+      const deviceId = params.get('id');
+      const cmd = params.get('cmd');
+      await this._replyConfirmPrompt(event.replyToken, deviceId, cmd);
+      return;
+    }
+
+    if (action === 'cmd') {
+      const deviceId = params.get('id');
+      const cmd = params.get('cmd');
+      await this._executeCommand(event.replyToken, deviceId, cmd);
+      return;
+    }
+
+    if (action === 'cancel') {
+      await this.lineService.replyMessage(event.replyToken, { type: 'text', text: 'ยกเลิกแล้วครับ' });
+      return;
+    }
+
+    if (action === 'house') {
+      await this.lineService.replyMessage(event.replyToken, buildHouseMenu());
+      return;
+    }
+
+    if (action === 'root') {
+      await this.lineService.replyMessage(event.replyToken, buildRootMenu());
+      return;
+    }
+
+    if (action === 'statusmenu') {
+      await this.lineService.replyMessage(event.replyToken, buildCategoryMenu());
+      return;
+    }
+
+    if (action === 'managemenu') {
+      await this.lineService.replyMessage(event.replyToken, buildManageMenu());
+      return;
+    }
+
+    if (action === 'armconfirm') {
+      const mode = params.get('mode');
+      await this._replyArmDisarmConfirm(event.replyToken, mode);
+      return;
+    }
+
+    if (action === 'armexec') {
+      const mode = params.get('mode');
+      await this._executeArmDisarm(event.replyToken, mode);
+      return;
+    }
+
+    logger.debug('[INTERACTION_ROUTER] Unrecognized postback action:', action);
+  }
+
+  async _replyArmDisarmConfirm(replyToken, mode) {
+    if (!armDisarmAvailable()) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังตั้งค่าเฝ้าบ้าน/ไปพักไม่เสร็จครับ' });
+      return;
+    }
+    await this.lineService.replyMessage(replyToken, buildArmDisarmConfirm(mode));
+  }
+
+  // The only place a real arm/disarm command is ever sent — only reachable
+  // after the confirm prompt's "✅ ใช่" tap, same pattern as
+  // _executeCommand. Triggers the pre-built "Arm"/"Disarm" Tap-to-Run Scene
+  // (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than commanding the
+  // Security Remote Control directly — that was tried first and rejected by
+  // Tuya (error 2008), since that device can transmit button-press events
+  // but can't receive downlink commands. This app tracks no armed/disarmed
+  // state of its own; Tuya's automation engine (enabled/disabled by the
+  // scene's own actions) already is that state.
+  async _executeArmDisarm(replyToken, mode) {
+    const sceneId = mode === 'arm' ? process.env.TUYA_ARM_SCENE_ID : process.env.TUYA_DISARM_SCENE_ID;
+    const label = mode === 'arm' ? 'เฝ้าบ้าน' : 'ไปพัก';
+    if (!sceneId) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: `${label}ผ่านนี้ยังไม่ได้ครับ` });
+      return;
+    }
+
+    try {
+      await tuyaRestClient.triggerScene(sceneId);
+      logger.info(`[INTERACTION_ROUTER] Triggered scene ${sceneId} (${mode})`);
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: `${label}เรียบร้อยครับ` });
+    } catch (err) {
+      logger.error(`[INTERACTION_ROUTER] Arm/disarm scene trigger failed (${mode}):`, err);
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: `ขอโทษครับ ${label}ไม่สำเร็จ ลองใหม่อีกครั้งนะครับ` });
+    }
+  }
+
+  async _replyConfirmPrompt(replyToken, deviceId, cmd) {
+    const device = deviceRegistry[deviceId];
+    if (!device) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: 'ไม่พบอุปกรณ์นี้แล้วครับ ลองเปิดเมนูใหม่อีกครั้งนะครับ'
+      });
+      return;
+    }
+    await this.lineService.replyMessage(replyToken, buildConfirmPrompt({ id: deviceId, ...device }, cmd));
+  }
+
+  // The only place a real Tuya command is ever sent — only reachable after
+  // the user has tapped the toggle button (opens the confirm prompt) *and*
+  // then tapped "ใช่" on that prompt. Never triggered by a single tap.
+  async _executeCommand(replyToken, deviceId, cmd) {
+    const device = deviceRegistry[deviceId];
+    if (!device) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: 'ไม่พบอุปกรณ์นี้แล้วครับ ลองเปิดเมนูใหม่อีกครั้งนะครับ'
+      });
+      return;
+    }
+
+    const controlDp = CONTROL_DP[device.dpProfile];
+    if (!controlDp) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `${device.name} ยังสั่งเปิด/ปิดผ่านนี้ไม่ได้ครับ`
+      });
+      return;
+    }
+
+    const actionLabel = cmd === 'on' ? 'เปิด' : 'ปิด';
+    try {
+      await tuyaRestClient.sendCommand(deviceId, [{ code: controlDp, value: cmd === 'on' }]);
+      logger.info(`[INTERACTION_ROUTER] Sent command (${controlDp}=${cmd === 'on'}) to ${deviceId}`);
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: `${actionLabel} ${device.name} เรียบร้อยครับ` });
+    } catch (err) {
+      logger.error(`[INTERACTION_ROUTER] Command failed for ${deviceId}:`, err);
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `ขอโทษครับ ${actionLabel} ${device.name} ไม่สำเร็จ ลองใหม่อีกครั้งนะครับ`
+      });
+    }
+  }
+
+  // Queries every queryable device's status in parallel — a partial failure
+  // (one device's Tuya call errors/times out) still shows every device that
+  // did succeed, rather than failing the whole table over one bad query.
+  async _replyAllStatus(replyToken) {
+    const devices = queryableDevices();
+    if (devices.length === 0) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังไม่มีอุปกรณ์ที่เช็คสถานะได้ครับ' });
+      return;
+    }
+
+    const settled = await Promise.allSettled(
+      devices.map((device) => tuyaRestClient.getDeviceStatus(device.id))
+    );
+
+    const results = devices.map((device, i) => {
+      const outcome = settled[i];
+      if (outcome.status === 'fulfilled') {
+        return { device, rawStatus: outcome.value };
+      }
+      logger.error(`[INTERACTION_ROUTER] Status query failed for ${device.id}:`, outcome.reason);
+      return { device, error: true };
+    });
+
+    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results));
+  }
+
+  async _replyDeviceStatus(replyToken, deviceId) {
+    const device = deviceRegistry[deviceId];
+    if (!device) {
+      // Registry can change between when a menu was sent and when it's
+      // tapped (device removed, .env pointed at a different registry) —
+      // don't trust the postback payload blindly.
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: 'ไม่พบอุปกรณ์นี้แล้วครับ ลองเปิดเมนูใหม่อีกครั้งนะครับ'
+      });
+      return;
+    }
+
+    try {
+      const rawStatus = await tuyaRestClient.getDeviceStatus(deviceId);
+      await this.lineService.replyMessage(
+        replyToken,
+        buildStatusCard({ id: deviceId, ...device }, rawStatus)
+      );
+    } catch (err) {
+      logger.error(`[INTERACTION_ROUTER] Status query failed for ${deviceId}:`, err);
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `ขอโทษครับ เช็คสถานะ ${device.name} ไม่ได้ในตอนนี้ ลองใหม่อีกครั้งนะครับ`
+      });
+    }
+  }
+}
+
+module.exports = InteractionRouter;
+```
+
+### 8.15 Webhook Server (`src/webhook/server.js`)
+
+```javascript
+const express = require('express');
+const { middleware, SignatureValidationFailed } = require('@line/bot-sdk');
+const LineMessagingService = require('../services/lineMessaging');
+const InteractionRouter = require('../services/interactionRouter');
+const logger = require('../utils/logger');
+
+// Phase 2: interactive status query & device control, driven entirely by
+// incoming LINE webhook events (trigger keyword / argument-less command, or
+// a tap on a previously-sent Quick Reply/postback). See
+// RUCKYOM_SPECIFICATION.md Section 2 and src/services/interactionRouter.js.
+function createWebhookServer() {
+  const app = express();
+  const lineService = new LineMessagingService();
+  const router = new InteractionRouter(lineService);
+
+  // Verifies the x-line-signature header against LINE_CHANNEL_SECRET and
+  // parses the JSON body — a request that fails signature verification
+  // never reaches the route handler at all.
+  const lineMiddleware = middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET });
+
+  app.post('/webhook', lineMiddleware, (req, res) => {
+    // Ack immediately — LINE expects a fast response, and a slow/failed ack
+    // just causes it to retry redelivering the same events. Event
+    // processing (Tuya REST calls, LINE replies) happens after; failures
+    // are logged internally rather than surfaced as an HTTP error.
+    res.status(200).end();
+    router
+      .handleEvents(req.body.events || [])
+      .catch((err) => logger.error('[WEBHOOK] Unhandled error processing events:', err));
+  });
+
+  // Without this, `middleware()` rejecting a bad/missing x-line-signature
+  // (via SignatureValidationFailed, thrown through next(err)) falls through
+  // to Express's default error handler, which returns 500 — misleading for
+  // what's actually a signature-verification rejection, and inconsistent
+  // with the DoD expectation of a 401 there.
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, next) => {
+    if (err instanceof SignatureValidationFailed) {
+      logger.error('[WEBHOOK] Signature validation failed:', err.message);
+      res.status(401).end();
+      return;
+    }
+    logger.error('[WEBHOOK] Unhandled middleware error:', err);
+    res.status(500).end();
+  });
+
+  return app;
+}
+
+module.exports = { createWebhookServer };
+
+```
+
+---
+
+## 9. Definition of Done
+
+### Phase 1
 
 Phase 1 is complete when all of the following hold:
 
@@ -1055,6 +2467,32 @@ Phase 1 is complete when all of the following hold:
 * Log file lines show the server's local Bangkok time (matching `date` on the VM), not raw UTC — verified via `getBangkokLogTimestamp()` (Section 8.3).
 * At `LOG_LEVEL=debug`, `[TUYA_IN]` shows the decrypted device payload for every incoming message and `[LINE_OUT]` shows the exact rendered text before each LINE push — both absent at the default `LOG_LEVEL=info`.
 * `ALARM_ON` followed by the alarm being silenced (`alarm_switch: false`) produces a second, distinct `ALARM_OFF` LINE message — not silence.
+* A device sending a DP code that means something different in another Tuya category (e.g. `switch_1`, a relay-only code, sent by a device registered as `dpProfile: "mcs"`) produces `UNKNOWN_EVENT`, never a misinterpreted alert — verified per Section 8.5/8.11's per-device profile dispatch.
+* An unregistered device (no `deviceRegistry.json` entry, or one with no `dpProfile`) produces `UNKNOWN_EVENT` for all its DPs rather than crashing or being silently dropped.
+
+### Phase 2 Increment 1 (Interactive Status Query)
+
+* `node src/app.js` boots cleanly with the full `REQUIRED_ENV` list set (Section 8.2), including the newly-required `TUYA_BASE_URL`, `LINE_CHANNEL_SECRET`, `PORT`.
+* A `POST /webhook` request with a missing or invalid `x-line-signature` header returns `401`, not `500` or a silent crash — verified per Section 8.15.
+* Typing the trigger keyword (`เมนู`) or an argument-less command (`/status`, `สถานะ`) in the LINE group opens the category menu via Quick Reply — and both entry points reach the identical menu.
+* The category menu only lists categories that have ≥1 device actually registered in `deviceRegistry.json` — adding or removing a device changes the menu without any code change.
+* Tapping through category → device → status returns a live Flex status card reflecting the device's real current state (cross-checked against the Smart Life app), not a cached or stale value.
+* No Quick Reply button label is truncated mid-word — every category/device label fits within LINE's 20-character `label` limit.
+* The Tuya REST client successfully mints an access token and completes a signed status-query request against the real Tuya OpenAPI (verified live during Increment 1's build, not just unit-level).
+* Tapping a device that's since been removed from the registry (stale postback) shows a graceful "device not found" message, not an unhandled error.
+* Tapping `📋 ทั้งหมด` (or typing `/status all`/`สถานะทั้งหมด`) returns one Flex Carousel with a bubble per queryable device, each reflecting real current state — verified live against all real registered devices.
+* A single device's status query failing inside the "all devices" carousel renders only that one bubble as an error state; every other device's bubble still shows its real, successfully-queried status.
+* N parallel status queries (e.g. from the "all devices" carousel) mint exactly one Tuya access token, not N — verified via `[TUYA_REST] Minted new access token` appearing once in the log, not once per device.
+
+### Phase 2 Increment 2 (Device Control & Arm/Disarm)
+
+* Tapping a controllable device's (relay/alarm) on/off Quick Reply button opens a Yes/No confirm prompt — the real Tuya command is never sent on the first tap; only after tapping "✅ ใช่" does `sendCommand()` fire, verified against real device state changing in the Smart Life app.
+* จัดการ (`buildManageMenu()`) lists only controllable devices and hides itself entirely if none are registered.
+* เฝ้าบ้าน/ไปพัก (arm/disarm) — reachable via `/arm`/`เฝ้าบ้าน`, `/disarm`/`ไปพัก`, or 🏠 ดูแลบ้าน in the root menu — hide themselves from every menu (`armDisarmAvailable()`) unless both `TUYA_ARM_SCENE_ID` and `TUYA_DISARM_SCENE_ID` are set.
+* Confirming เฝ้าบ้าน or ไปพัก triggers the correct pre-built Tap-to-Run Scene (`triggerScene()`, Section 8.13) — verified live: the corresponding automation actually enables/disables in the Smart Life app, not just a "success" LINE reply.
+* Commanding the Security Remote Control device directly (rather than via a Scene) is confirmed **not** to work — Tuya returns `2008 command or value not support` — and is not attempted anywhere in the codebase; see `TUYA_DEVICE_DP_REGISTRY.md`'s `sos` section for the resolution.
+* Typing the bot's own name (`LINE_BOT_NAME`) opens the greeting shortcut menu (`buildGreeting()`), including เฝ้าบ้าน/ไปพัก buttons only when `armDisarmAvailable()`.
+* A stale postback referencing a device since removed from `deviceRegistry.json` shows a graceful "device not found" message for both status and control actions, not an unhandled error.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

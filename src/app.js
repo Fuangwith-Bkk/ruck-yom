@@ -11,6 +11,7 @@ const SensorNormalizer = require('./services/sensorNormalizer');
 const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
+const { createWebhookServer } = require('./webhook/server');
 const logger = require('./utils/logger');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
@@ -40,9 +41,9 @@ const client = new TuyaWebsocket({
   }
 });
 
-// SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example
-// and poc/tuya-listener.js. The device event itself is nested under
-// message.payload.data (devId, status), not on message directly.
+// SDK emits (ws, message) — confirmed by tuya-pulsar-ws-node's README/example.
+// The device event itself is nested under message.payload.data (devId,
+// status), not on message directly.
 client.message(async (ws, message) => {
   try {
     // 1. Always ACK incoming message to prevent infinite Pulsar retry loops
@@ -90,3 +91,12 @@ client.error((wsOrErr, maybeErr) => {
 });
 
 client.start();
+
+// Phase 2: interactive status query webhook, runs alongside the Pulsar
+// client above. Independent of it — a webhook failure doesn't affect
+// Phase 1 alerting, and vice versa.
+const webhookApp = createWebhookServer();
+const port = process.env.PORT || 3000;
+webhookApp.listen(port, () => {
+  logger.info(`Webhook server listening on port ${port}.`);
+});

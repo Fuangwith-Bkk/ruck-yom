@@ -1,3 +1,5 @@
 {
-  "eb0000000000000000abcd": "ประตูหน้าบ้าน"
+  "eb0000000000000000abcd": { "name": "ประตูหน้าบ้าน", "category": "door", "dpProfile": "mcs" },
+  "eb0000000000000000efgh": { "name": "หลอดไฟยาวหน้าบ้าน", "category": "relay", "dpProfile": "tdq" },
+  "eb0000000000000000ijkl": { "name": "Alarm", "category": "alarm", "dpProfile": "sgbj" }
 }
