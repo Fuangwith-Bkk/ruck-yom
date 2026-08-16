@@ -139,6 +139,17 @@ async function triggerScene(ruleId) {
   return request('POST', `/v2.0/cloud/scene/rule/${ruleId}/actions/trigger`, { accessToken });
 }
 
+// Reads a Scene/Automation Linkage Rule's current detail, including its
+// `status` ("enable"/"disable"). Used at boot (app.js) to recover
+// houseMode.js's armed/disarmed state from Tuya's own automation state
+// instead of starting every restart with an unknown mode — see
+// TUYA_ALARM_AUTOMATION_ID in .env.example. Same rule_id concept as
+// triggerScene() above, just GET instead of a trigger POST.
+async function getSceneRule(ruleId) {
+  const accessToken = await getAccessToken();
+  return request('GET', `/v2.0/cloud/scene/rule/${ruleId}`, { accessToken });
+}
+
 // Device operation history — 7-day free retention per Tuya's Device Log
 // Service. Defaults to the full 7-day window with size=10 — a wider time
 // window with the same row cap can never return fewer rows than a narrower
@@ -178,4 +189,4 @@ async function getDeviceLogs(deviceId, { startTime, endTime, size = 10 } = {}) {
   return request('GET', `/v1.0/devices/${deviceId}/logs?${sortedQuery}`, { accessToken });
 }
 
-module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getDeviceLogs };
+module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getSceneRule, getDeviceLogs };

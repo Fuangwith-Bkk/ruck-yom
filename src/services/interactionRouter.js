@@ -3,6 +3,7 @@ const { CONTROL_DP } = require('../config/dpProfiles');
 const tuyaRestClient = require('./tuyaRestClient');
 const quietMode = require('./quietMode');
 const houseMode = require('./houseMode');
+const statusReport = require('./statusReport');
 const {
   buildRootMenu,
   buildCategoryMenu,
@@ -15,7 +16,7 @@ const {
   queryableDevices,
   armDisarmAvailable
 } = require('../templates/menuBuilders');
-const { buildStatusCard, buildAllStatusTable, buildConfirmPrompt } = require('../templates/statusCard');
+const { buildStatusCard, buildConfirmPrompt } = require('../templates/statusCard');
 const { buildHistoryMessage } = require('../templates/historyCard');
 const logger = require('../utils/logger');
 
@@ -371,34 +372,19 @@ class InteractionRouter {
     }
   }
 
-  // Queries every queryable device's status in parallel — a partial failure
-  // (one device's Tuya call errors/times out) still shows every device that
-  // did succeed, rather than failing the whole carousel over one bad query.
+  // Queries every queryable device's status in parallel (plus houseMode/
+  // quietMode/LINE-quota context) via statusReport.js, shared with the
+  // automatic daily summary (dailyReport.js) — a partial device-query
+  // failure still shows every device that did succeed, rather than failing
+  // the whole table over one bad query.
   async _replyAllStatus(replyToken) {
-    const devices = queryableDevices();
-    if (devices.length === 0) {
+    if (queryableDevices().length === 0) {
       await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังไม่มีอุปกรณ์ที่เช็คสถานะได้ครับ' });
       return;
     }
 
-    const settled = await Promise.allSettled(
-      devices.map((device) => tuyaRestClient.getDeviceStatus(device.id))
-    );
-
-    const results = devices.map((device, i) => {
-      const outcome = settled[i];
-      if (outcome.status === 'fulfilled') {
-        return { device, rawStatus: outcome.value };
-      }
-      logger.error(`[INTERACTION_ROUTER] Status query failed for ${device.id}:`, outcome.reason);
-      return { device, error: true };
-    });
-
-    const modeInfo = {
-      armMode: houseMode.getMode(),
-      quietMinutes: quietMode.isQuiet() ? quietMode.remainingMinutes() : 0
-    };
-    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results, modeInfo));
+    const message = await statusReport.buildReport(this.lineService);
+    await this.lineService.replyMessage(replyToken, message);
   }
 
   async _replyDeviceStatus(replyToken, deviceId) {

@@ -14,6 +14,8 @@ const CLAUSES = {
   RELAY_OFF: (event) => `ปิด ${event.deviceName}`,
   WATER_LEAK: (event) => `น้ำรั่วที่ ${event.deviceName}`,
   BATTERY_LOW: (event) => `${event.deviceName} แบตเหลือ ${event.batteryLevel}%`,
+  REMOTE_ARMED: () => 'กดเฝ้าบ้านจากรีโมท',
+  REMOTE_DISARMED: () => 'กดไปพักจากรีโมท',
   UNKNOWN_EVENT: (event) => `${event.deviceName} มีเหตุการณ์ไม่ทราบสาเหตุ`
 };
 
@@ -30,8 +32,17 @@ const TERMINAL_EVENT = 'ALARM_ON';
 // for when a smoke sensor is added — no such device/dpProfile exists yet
 // (TUYA_DEVICE_DP_REGISTRY.md/dpProfiles.js), but the moment one is, it
 // should bypass quiet mode without anyone having to remember to update this
-// list again.
-const CRITICAL_EVENT_TYPES = new Set(['ALARM_ON', 'ALARM_OFF', 'WATER_LEAK', 'SMOKE_DETECTED']);
+// list again. REMOTE_ARMED/REMOTE_DISARMED are included too: app.js sets
+// quietMode indefinite *before* pushing the REMOTE_DISARMED confirmation, so
+// without this the confirmation would suppress itself.
+const CRITICAL_EVENT_TYPES = new Set([
+  'ALARM_ON',
+  'ALARM_OFF',
+  'WATER_LEAK',
+  'SMOKE_DETECTED',
+  'REMOTE_ARMED',
+  'REMOTE_DISARMED'
+]);
 
 const windowMs = () => Number(process.env.EVENT_CORRELATION_WINDOW_MS) || 15000;
 

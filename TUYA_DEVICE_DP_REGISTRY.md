@@ -73,8 +73,8 @@ R7054-V2 Security remote control).
 |---|---|---|---|
 | `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ⚠️ |
 | `sos` | Enum | `sos` | ⚠️ |
-| `arm` | Enum | `arm` (single-value range) | ⚠️ not commandable |
-| `disarmed` | Enum | `disarmed` (single-value range) | ⚠️ not commandable |
+| `arm` | Enum | `arm` (single-value range) | ✅ `REMOTE_ARMED` — syncs houseMode/quietMode same as เฝ้าบ้าน; not commandable |
+| `disarmed` | Enum | `disarmed` (single-value range) | ✅ `REMOTE_DISARMED` — syncs houseMode/quietMode same as ไปพัก; not commandable |
 | `home` | Enum | `home` (single-value range) | ⚠️ not commandable |
 
 > ✅ **Resolved (2026-08-15):** switching this product from Standard
@@ -95,6 +95,14 @@ R7054-V2 Security remote control).
 > this device directly. The Scenes replicate the same "Then" actions the
 > physical remote buttons would trigger. Confirmed live end-to-end via LINE
 > on 2026-08-15.
+>
+> **Reverse direction (2026-08-16):** pressing `arm`/`disarmed` directly on
+> the remote (not via LINE) now also syncs the bot's own state — `app.js`
+> reacts to `REMOTE_ARMED`/`REMOTE_DISARMED` by calling the same
+> `houseMode.setMode()`/`quietMode` calls `interactionRouter.js`'s
+> `_executeArmDisarm` uses, and pushes a confirmation message. Before this,
+> a remote-only arm/disarm left `houseMode`/`quietMode` unchanged and the
+> button press itself only ever surfaced as an `UNKNOWN_EVENT`.
 
 ---
 

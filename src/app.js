@@ -13,6 +13,9 @@ const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
 const { createWebhookServer } = require('./webhook/server');
 const quietMode = require('./services/quietMode');
+const houseMode = require('./services/houseMode');
+const dailyReport = require('./services/dailyReport');
+const tuyaRestClient = require('./services/tuyaRestClient');
 const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
 
@@ -73,6 +76,23 @@ client.message(async (ws, message) => {
     // consolidation window, or flush a consolidated message — see
     // Section 8.8.
     for (const event of events) {
+      // Physical Security Remote Control arm/disarm buttons (dpProfiles.js's
+      // `sos` profile) are the hardware-side counterpart to interactionRouter
+      // .js's _executeArmDisarm — same houseMode/quietMode side effects,
+      // just triggered by a button press instead of a LINE tap. Must run
+      // before correlator.process() below so the REMOTE_ARMED/REMOTE_DISARMED
+      // confirmation message it pushes already reflects the new quiet state.
+      if (event.eventType === 'REMOTE_ARMED' || event.eventType === 'REMOTE_DISARMED') {
+        const mode = event.eventType === 'REMOTE_ARMED' ? 'arm' : 'disarm';
+        houseMode.setMode(mode);
+        if (mode === 'disarm') {
+          quietMode.setIndefiniteQuiet();
+        } else {
+          quietMode.clearQuiet();
+        }
+        logger.info(`[REMOTE] Physical remote ${mode} — synced houseMode/quietMode`);
+      }
+
       await correlator.process(event);
     }
 
@@ -119,4 +139,29 @@ if (crashedQuietState) {
   lineService
     .pushMessage(`ระบบรีสตาร์ทครับ กลับมาแจ้งเตือนตามปกติแล้วนะครับ (${detail})`)
     .catch((err) => logger.error('[QUIET_MODE] Failed to send crash-recovery message:', err));
+}
+
+// Optional daily รายงาน push (DAILY_REPORT_TIME) — no-ops if unset. See
+// dailyReport.js for scheduling details.
+dailyReport.start(lineService);
+
+// Boot-time houseMode recovery: without this, every restart starts รายงาน's
+// mode line as unknown until the next LINE command or remote button press,
+// even though Tuya itself already knows the real state. This deployment's
+// "Arm" Tap-to-Run scene enables the "Alarm" automation (rule_id below);
+// "Disarm" disables it (and switches the siren off) — so its current
+// enable/disable status is an authoritative stand-in for เฝ้าบ้าน/ไปพัก at
+// startup. Optional — TUYA_ALARM_AUTOMATION_ID depends on a specific
+// automation setup that may not exist/match in every deployment; if unset,
+// houseMode just starts unknown as before.
+const alarmAutomationId = process.env.TUYA_ALARM_AUTOMATION_ID;
+if (alarmAutomationId) {
+  tuyaRestClient
+    .getSceneRule(alarmAutomationId)
+    .then((rule) => {
+      const mode = rule.status === 'enable' ? 'arm' : 'disarm';
+      houseMode.setMode(mode);
+      logger.info(`[HOUSE_MODE] Recovered mode at boot from Tuya "Alarm" automation: ${mode}`);
+    })
+    .catch((err) => logger.error('[HOUSE_MODE] Failed to recover mode at boot:', err));
 }

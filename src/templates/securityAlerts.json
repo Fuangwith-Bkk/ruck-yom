@@ -8,6 +8,8 @@
   "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
   "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",
   "BATTERY_LOW": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} แบตใกล้หมดแล้ว เหลือ {{batteryLevel}}% เอง กลัวมันหมดแล้วเฝ้าบ้านไม่ได้ครับ ช่วยไปเปลี่ยนแบตให้หน่อยนะครับ\n{{timestamp}}",
+  "REMOTE_ARMED": "มีคนกดเฝ้าบ้านจากรีโมทครับ เฝ้าบ้านเรียบร้อยครับ แจ้งเตือนตามปกติครับ\n{{timestamp}}",
+  "REMOTE_DISARMED": "มีคนกดไปพักจากรีโมทครับ ไปพักเรียบร้อยครับ 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ\n{{timestamp}}",
   "UNKNOWN_EVENT": "{{botName}} ได้รับแจ้งว่า\nอุปกรณ์ {{deviceName}}\nตรวจพบว่า {{rawPayload}}\nช่วย {{botName}} ดูหน่อยนะครับ\n{{timestamp}}",
   "CHAIN_ESCALATION": "{{botName}}วิ่งมาบอกครับ! มีเหตุการณ์ต่อเนื่องเกิดขึ้นครับ:\n{{lines}}\n{{timestamp}}"
 }

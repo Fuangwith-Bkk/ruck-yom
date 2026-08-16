@@ -251,17 +251,18 @@ function buildStatusRow(device, rawStatus, error) {
 }
 
 // Mode summary lines shown above the device table — armMode reflects only
-// the last เฝ้าบ้าน/ไปพัก *this bot* itself triggered (houseMode.js), not a
-// verified live query against Tuya, so it's labeled as such rather than
-// presented as fact. Omitted entirely if neither is currently known/active,
-// rather than showing a misleading "unknown" placeholder.
+// the last เฝ้าบ้าน/ไปพัก this app observed, either via LINE or the physical
+// remote (houseMode.js), not a verified live query against Tuya, so it's
+// labeled as such rather than presented as fact. Omitted entirely if
+// neither is currently known/active, rather than showing a misleading
+// "unknown" placeholder.
 function buildModeSection({ armMode, quietMinutes } = {}) {
   const lines = [];
 
   if (armMode === 'arm') {
-    lines.push('🛡️ เฝ้าบ้าน (ล่าสุดจากบอท)');
+    lines.push('🛡️ เฝ้าบ้าน (ล่าสุดที่ทราบ)');
   } else if (armMode === 'disarm') {
-    lines.push('🛌 ไปพัก (ล่าสุดจากบอท)');
+    lines.push('🛌 ไปพัก (ล่าสุดที่ทราบ)');
   }
 
   // quietMinutes: null = indefinite (quietMode.remainingMinutes() returns
@@ -285,18 +286,42 @@ function buildModeSection({ armMode, quietMinutes } = {}) {
   ];
 }
 
+// LINE's monthly push-message quota (lineMessaging.js's getQuota) — best
+// effort, same tier as armMode/quietMinutes above: omitted entirely rather
+// than shown as "unknown" if the query failed or wasn't attempted. `quota`
+// is LINE's raw MessageQuotaResponse ({ type: 'limited'|'none', value? });
+// `type: 'none'` means an unlimited plan, so there's no denominator to show.
+function buildQuotaSection({ quota, quotaConsumed } = {}) {
+  if (quota == null || quotaConsumed == null) return [];
+
+  const text =
+    quota.type === 'limited' && typeof quota.value === 'number'
+      ? `📨 ส่งข้อความไปแล้ว ${quotaConsumed}/${quota.value} ครั้งเดือนนี้`
+      : `📨 ส่งข้อความไปแล้ว ${quotaConsumed} ครั้งเดือนนี้ (ไม่จำกัดโควต้า)`;
+
+  return [
+    {
+      type: 'box',
+      layout: 'vertical',
+      contents: [{ type: 'text', text, size: 'sm', color: '#888888' }]
+    },
+    { type: 'separator', margin: 'md' }
+  ];
+}
+
 // `results` is an array of { device, rawStatus, error } — one entry per
-// queryable device, in registry order. `modeInfo` ({ armMode, quietMinutes })
-// is optional context beyond device status (Increment 3). Single Flex
-// Bubble, one row per device — reads as a table, no swiping needed (the
-// earlier Flex Carousel version required tapping through one card per
-// device, which was harder to scan at a glance for the whole house at once).
+// queryable device, in registry order. `modeInfo` ({ armMode, quietMinutes,
+// quota, quotaConsumed }) is optional context beyond device status
+// (Increment 3, plus daily summary). Single Flex Bubble, one row per device
+// — reads as a table, no swiping needed (the earlier Flex Carousel version
+// required tapping through one card per device, which was harder to scan at
+// a glance for the whole house at once).
 function buildAllStatusTable(results, modeInfo) {
   const deviceRows = results.flatMap(({ device, rawStatus, error }, i) => {
     const row = buildStatusRow(device, rawStatus, error);
     return i === 0 ? [row] : [{ type: 'separator', margin: 'md' }, row];
   });
-  const rows = [...buildModeSection(modeInfo), ...deviceRows];
+  const rows = [...buildModeSection(modeInfo), ...buildQuotaSection(modeInfo), ...deviceRows];
 
   return {
     type: 'flex',

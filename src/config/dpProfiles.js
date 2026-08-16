@@ -52,6 +52,14 @@ function waterLeak(value) {
   return { eventType: 'WATER_LEAK' };
 }
 
+function remoteArmed() {
+  return { eventType: 'REMOTE_ARMED' };
+}
+
+function remoteDisarmed() {
+  return { eventType: 'REMOTE_DISARMED' };
+}
+
 const DP_PROFILES = {
   // Contact Sensor (door/window) — confirmed via Tuya IoT Platform Product
   // Category for ประตูระเบียงห้องพ่อ, ประตูครัว, ประตูหน้าบ้าน (2026-08-15).
@@ -87,12 +95,20 @@ const DP_PROFILES = {
   // carried over unchanged from the pre-dpProfiles normalizer.
   watersensor: {
     watersensor_state: waterLeak
+  },
+  // Security Remote Control (Emergency Button / รีโมท) — per
+  // TUYA_DEVICE_DP_REGISTRY.md, its 4 physical buttons (home, arm, disarm,
+  // sos) each transmit as their own single-value-range Enum DP, so the DP
+  // *code* itself (not the value, which is always identical to the code) is
+  // what identifies the button pressed. Only `arm`/`disarmed` are handled —
+  // these drive houseMode/quietMode the same way the LINE-side เฝ้าบ้าน/
+  // ไปพัก commands do (app.js). `home` and `sos` fall through to
+  // UNKNOWN_EVENT for now; this device can't receive cloud commands either
+  // way (Tuya error 2008), so nothing here ever needs a CONTROL_DP entry.
+  sos: {
+    arm: remoteArmed,
+    disarmed: remoteDisarmed
   }
-  // `sos` (Emergency Button / รีโมท) intentionally has no entry — per
-  // TUYA_DEVICE_DP_REGISTRY.md, only a single `sos` enum is documented
-  // against a Remark describing 4 physical buttons, unresolved. Devices
-  // registered with dpProfile "sos" safely fall through to UNKNOWN_EVENT for
-  // every DP until this is confirmed against the real device.
 };
 
 // Increment 2 (device control): which DP code a profile's on/off toggle

@@ -51,14 +51,24 @@
 │ • Device control — relay/alarm on-off, each behind a Yes/No confirm step        │
 │ • เฝ้าบ้าน/ไปพัก (arm/disarm) — triggers pre-built Tuya Tap-to-Run Scenes,        │
 │   not a direct device command (the security remote is a sleepy Zigbee end       │
-│   device that can't receive downlink commands — see Section 8.13)               │
+│   device that can't receive downlink commands — see Section 8.13); the          │
+│   reverse direction also works — pressing arm/disarm on the physical            │
+│   remote itself syncs houseMode/quietMode the same way (app.js, on the          │
+│   REMOTE_ARMED/REMOTE_DISARMED events from dpProfiles.js's `sos` profile)       │
 │ • ประวัติ — per-device recent-activity view via Tuya's Device Log API            │
 │ • เงียบๆหน่อย (quiet mode) — app-level LINE-push suppression, timed or           │
 │   indefinite; ไปพัก auto-enters it, เฝ้าบ้าน/กลับบ้าน end it. Critical events     │
 │   (ALARM_ON/OFF, WATER_LEAK) always bypass it. No Tuya-side API exists to       │
 │   pause/resume the Message Service itself — see Section 8.16                    │
-│ • รายงาน — device status table plus a best-effort arm/disarm + quiet-mode        │
-│   summary line (houseMode.js, Section 8.17)                                     │
+│ • รายงาน — device status table plus a best-effort arm/disarm + quiet-mode       │
+│   summary line (houseMode.js, Section 8.17), LINE monthly push-quota usage      │
+│   (Section 8.7), and an optional once-daily automatic push (DAILY_REPORT_TIME,  │
+│   dailyReport.js, Section 8.20) sharing the same builder (statusReport.js,      │
+│   Section 8.19) as the manual command                                          │
+│ • houseMode boot recovery — if TUYA_ALARM_AUTOMATION_ID is set, app.js queries  │
+│   that Tuya automation's enable/disable status at startup and seeds houseMode   │
+│   from it, instead of starting every restart with an unknown mode (Section 8.9, │
+│   8.13's getSceneRule)                                                          │
 │ • Not yet built: breaker timer preset                                           │
 └─────────────────────────┬───────────────────────────────────────────────────────┘
                           │
@@ -175,6 +185,7 @@ TUYA_ACCESS_SECRET=your_tuya_access_secret
 TUYA_SMART_LIFE_UID=your_smart_life_uid   # Not read by any current code path — used manually (via the Tuya API Explorer's "Query Home List") to look up the space_id needed to find the scene rule_ids below. Kept scaffolded for a possible future auto-discovery feature.
 TUYA_ARM_SCENE_ID=your_arm_scene_rule_id       # Tap-to-Run scene rule_id for เฝ้าบ้าน — find via Cloud > API Explorer > Scene Linkage Rules > Query Linkage Rules (space_id = your home's id), filter type="scene". Optional — เฝ้าบ้าน/ไปพัก hide themselves from the menu if unset.
 TUYA_DISARM_SCENE_ID=your_disarm_scene_rule_id # Same, for ไปพัก.
+TUYA_ALARM_AUTOMATION_ID=your_alarm_automation_rule_id # rule_id of the automation (type="automation" in the same Query Linkage Rules list above) that "Arm" enables and "Disarm" disables — used at boot to recover houseMode's เฝ้าบ้าน/ไปพัก instead of starting unknown after every restart (Section 8.9, 8.13). Optional; depends on this exact automation setup existing.
 
 # Tuya Pulsar Message Service
 TUYA_MQ_URL=wss://mqe-sg.iotbing.com:8285/
@@ -188,6 +199,9 @@ LINE_BOT_NAME=รักยม                            # Used as {{botName}} i
 
 # Event Consolidation
 EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidation window (ms). Optional, defaults to 15000.
+
+# Daily Summary
+DAILY_REPORT_TIME=08:00                        # HH:mm, in TIMEZONE. Pushes รายงาน (device status + houseMode/quietMode + LINE quota) once a day, bypassing quiet mode (Section 8.20). Optional — disabled if unset.
 
 # Quiet Mode (เงียบๆหน่อย)
 QUIET_STATE_FILE=./quiet-state.json            # Crash-recovery marker file (existence-only signal, not real state persistence). Optional, defaults to ./quiet-state.json.
@@ -241,7 +255,9 @@ ruck-yom/
 │   │   ├── tuyaRestClient.js       # [Phase 2] Hand-rolled Tuya OpenAPI client — token minting, signed status/log queries, device commands, and Tap-to-Run Scene triggering
 │   │   ├── interactionRouter.js    # [Phase 2] Webhook event dispatch: trigger keyword/command -> menu -> status/control/arm-disarm/history/quiet-mode
 │   │   ├── quietMode.js            # [Phase 2, Increment 3] In-memory quiet-mode state (timed or indefinite) + crash-recovery marker file; see Section 8.16
-│   │   └── houseMode.js            # [Phase 2, Increment 3] Best-effort last-known arm/disarm, for รายงาน display only; see Section 8.17
+│   │   ├── houseMode.js            # [Phase 2, Increment 3] Best-effort last-known arm/disarm, for รายงาน display only — seeded via LINE, the physical remote, or a Tuya automation query at boot; see Section 8.17
+│   │   ├── statusReport.js         # [Phase 2, Increment 4] Shared รายงาน builder (device status + houseMode/quietMode + LINE quota) — used by both the manual command and the daily push; see Section 8.19
+│   │   └── dailyReport.js          # [Phase 2, Increment 4] Optional once-daily automatic รายงาน push (DAILY_REPORT_TIME); see Section 8.20
 │   ├── templates/
 │   │   ├── securityAlerts.json     # Localized Thai alert message templates (Phase 1)
 │   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm/quiet), dynamic, not static JSON
@@ -287,7 +303,8 @@ authoritative source is `dpProfiles.js` itself, cross-referenced with
 | `tdq` | Breaker | `switch_1` | `true` / `false` | `RELAY_ON` / `RELAY_OFF` |
 | `sgbj` | Siren | `alarm_switch` | `true` / `false` | `ALARM_ON` / `ALARM_OFF` |
 | `watersensor`* | Water Leak Sensor | `watersensor_state` | `"alarm"` / `"normal"` | `WATER_LEAK` / *(silent)* |
-| `sos` | Emergency Button | *(none — unresolved, see `TUYA_DEVICE_DP_REGISTRY.md`)* | — | *(always `UNKNOWN_EVENT`)* |
+| `sos` | Emergency Button (Security Remote Control) | `arm` / `disarmed` | `"arm"` / `"disarmed"` | `REMOTE_ARMED` / `REMOTE_DISARMED` |
+| `sos` | Emergency Button (Security Remote Control) | `home` / `sos` | — | *(still `UNKNOWN_EVENT`, see `TUYA_DEVICE_DP_REGISTRY.md`)* |
 
 \* `watersensor` is a placeholder profile key — no device is registered
 under it yet, and the real Tuya Product Category code hasn't been confirmed
@@ -319,6 +336,8 @@ Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside th
   "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
   "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",
   "BATTERY_LOW": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} แบตใกล้หมดแล้ว เหลือ {{batteryLevel}}% เอง กลัวมันหมดแล้วเฝ้าบ้านไม่ได้ครับ ช่วยไปเปลี่ยนแบตให้หน่อยนะครับ\n{{timestamp}}",
+  "REMOTE_ARMED": "มีคนกดเฝ้าบ้านจากรีโมทครับ เฝ้าบ้านเรียบร้อยครับ แจ้งเตือนตามปกติครับ\n{{timestamp}}",
+  "REMOTE_DISARMED": "มีคนกดไปพักจากรีโมทครับ ไปพักเรียบร้อยครับ 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ\n{{timestamp}}",
   "UNKNOWN_EVENT": "{{botName}} ได้รับแจ้งว่า\nอุปกรณ์ {{deviceName}}\nตรวจพบว่า {{rawPayload}}\nช่วย {{botName}} ดูหน่อยนะครับ\n{{timestamp}}",
   "CHAIN_ESCALATION": "{{botName}}วิ่งมาบอกครับ! มีเหตุการณ์ต่อเนื่องเกิดขึ้นครับ:\n{{lines}}\n{{timestamp}}"
 }
@@ -642,15 +661,36 @@ class LineMessagingService {
     this.groupId = process.env.LINE_GROUP_ID;
   }
 
-  async pushMessage(text) {
+  // `content` is either a plain string (wrapped as a text message, the
+  // original/common case — every alert template renders to a string) or a
+  // pre-built message object/array (e.g. statusReport.js's Flex รายงาน
+  // table for the daily summary) — same accepts-either pattern as
+  // replyMessage below.
+  async pushMessage(content) {
     if (!this.groupId) {
       throw new Error('LINE_GROUP_ID is missing from environment.');
     }
 
+    const messages =
+      typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [content];
+
     await this.client.pushMessage({
       to: this.groupId,
-      messages: [{ type: 'text', text }]
+      messages
     });
+  }
+
+  // LINE's monthly push-message quota + how much of it has been used so
+  // far this month — surfaced in รายงาน (statusReport.js) so a nearly-spent
+  // quota isn't a silent surprise. Both are lightweight GETs against LINE's
+  // own API, unrelated to Tuya. Callers decide how to handle a failure
+  // (statusReport.js treats it as best-effort, same as houseMode/quietMode).
+  async getQuota() {
+    const [quota, consumption] = await Promise.all([
+      this.client.getMessageQuota(),
+      this.client.getMessageQuotaConsumption()
+    ]);
+    return { quota, consumption };
   }
 
   // For responding to an incoming webhook event (Phase 2 interactive menu).
@@ -699,10 +739,13 @@ is the single choke point every LINE alert push goes through, so it's also
 where `quietMode.js` (Section 8.16) is checked: if quiet mode is active
 (timed, via เงียบๆหน่อย, or indefinite, via an automatic ไปพัก), the push is
 skipped and logged instead of sent. `CRITICAL_EVENT_TYPES` (`ALARM_ON`,
-`ALARM_OFF`, `WATER_LEAK`, and a pre-emptive `SMOKE_DETECTED` for when a
-smoke sensor is eventually added) always bypass this gate — neither a manual
-quiet request nor the automatic ไปพัก quiet should be able to hide a real
-emergency. Because a burst of routine events can still fold a critical one
+`ALARM_OFF`, `WATER_LEAK`, a pre-emptive `SMOKE_DETECTED` for when a smoke
+sensor is eventually added, and `REMOTE_ARMED`/`REMOTE_DISARMED`) always
+bypass this gate — neither a manual quiet request nor the automatic ไปพัก
+quiet should be able to hide a real emergency, and a REMOTE_DISARMED
+confirmation must still get through even though it just set the very
+indefinite quiet that would otherwise suppress it (app.js, Section 8.5).
+Because a burst of routine events can still fold a critical one
 into a single `CHAIN_ESCALATION` message, `_flush()` also tags that
 synthetic event with `containsCritical` if any of its consolidated lines
 were critical, so the whole message still bypasses the gate rather than only
@@ -725,6 +768,8 @@ const CLAUSES = {
   RELAY_OFF: (event) => `ปิด ${event.deviceName}`,
   WATER_LEAK: (event) => `น้ำรั่วที่ ${event.deviceName}`,
   BATTERY_LOW: (event) => `${event.deviceName} แบตเหลือ ${event.batteryLevel}%`,
+  REMOTE_ARMED: () => 'กดเฝ้าบ้านจากรีโมท',
+  REMOTE_DISARMED: () => 'กดไปพักจากรีโมท',
   UNKNOWN_EVENT: (event) => `${event.deviceName} มีเหตุการณ์ไม่ทราบสาเหตุ`
 };
 
@@ -741,8 +786,17 @@ const TERMINAL_EVENT = 'ALARM_ON';
 // for when a smoke sensor is added — no such device/dpProfile exists yet
 // (TUYA_DEVICE_DP_REGISTRY.md/dpProfiles.js), but the moment one is, it
 // should bypass quiet mode without anyone having to remember to update this
-// list again.
-const CRITICAL_EVENT_TYPES = new Set(['ALARM_ON', 'ALARM_OFF', 'WATER_LEAK', 'SMOKE_DETECTED']);
+// list again. REMOTE_ARMED/REMOTE_DISARMED are included too: app.js sets
+// quietMode indefinite *before* pushing the REMOTE_DISARMED confirmation, so
+// without this the confirmation would suppress itself.
+const CRITICAL_EVENT_TYPES = new Set([
+  'ALARM_ON',
+  'ALARM_OFF',
+  'WATER_LEAK',
+  'SMOKE_DETECTED',
+  'REMOTE_ARMED',
+  'REMOTE_DISARMED'
+]);
 
 const windowMs = () => Number(process.env.EVENT_CORRELATION_WINDOW_MS) || 15000;
 
@@ -864,6 +918,17 @@ returns non-null, the previous process died while quiet mode was active;
 this pushes one explicit "restarted, alerting is back to normal" message to
 the group rather than silently resuming with no one told.
 
+**Increment 4 additions** — `dailyReport.start(lineService)` (Section 8.20)
+is a no-op unless `DAILY_REPORT_TIME` is set. Separately, if
+`TUYA_ALARM_AUTOMATION_ID` is set, boot also queries that automation's
+current enable/disable status (`tuyaRestClient.getSceneRule`, Section 8.13)
+and seeds `houseMode` from it (`enable` → `arm`, `disable` → `disarm`) —
+this deployment's "Arm" Tap-to-Run scene enables that automation and
+"Disarm" disables it, so its status is an authoritative stand-in for
+เฝ้าบ้าน/ไปพัก at startup, fixing the case where a restart would otherwise
+leave รายงาน's mode line unknown until the next LINE command or remote
+button press.
+
 ```javascript
 require('dotenv').config();
 const path = require('path');
@@ -880,6 +945,9 @@ const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
 const { createWebhookServer } = require('./webhook/server');
 const quietMode = require('./services/quietMode');
+const houseMode = require('./services/houseMode');
+const dailyReport = require('./services/dailyReport');
+const tuyaRestClient = require('./services/tuyaRestClient');
 const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
 
@@ -940,6 +1008,23 @@ client.message(async (ws, message) => {
     // consolidation window, or flush a consolidated message — see
     // Section 8.8.
     for (const event of events) {
+      // Physical Security Remote Control arm/disarm buttons (dpProfiles.js's
+      // `sos` profile) are the hardware-side counterpart to interactionRouter
+      // .js's _executeArmDisarm — same houseMode/quietMode side effects,
+      // just triggered by a button press instead of a LINE tap. Must run
+      // before correlator.process() below so the REMOTE_ARMED/REMOTE_DISARMED
+      // confirmation message it pushes already reflects the new quiet state.
+      if (event.eventType === 'REMOTE_ARMED' || event.eventType === 'REMOTE_DISARMED') {
+        const mode = event.eventType === 'REMOTE_ARMED' ? 'arm' : 'disarm';
+        houseMode.setMode(mode);
+        if (mode === 'disarm') {
+          quietMode.setIndefiniteQuiet();
+        } else {
+          quietMode.clearQuiet();
+        }
+        logger.info(`[REMOTE] Physical remote ${mode} — synced houseMode/quietMode`);
+      }
+
       await correlator.process(event);
     }
 
@@ -986,6 +1071,31 @@ if (crashedQuietState) {
   lineService
     .pushMessage(`ระบบรีสตาร์ทครับ กลับมาแจ้งเตือนตามปกติแล้วนะครับ (${detail})`)
     .catch((err) => logger.error('[QUIET_MODE] Failed to send crash-recovery message:', err));
+}
+
+// Optional daily รายงาน push (DAILY_REPORT_TIME) — no-ops if unset. See
+// dailyReport.js for scheduling details.
+dailyReport.start(lineService);
+
+// Boot-time houseMode recovery: without this, every restart starts รายงาน's
+// mode line as unknown until the next LINE command or remote button press,
+// even though Tuya itself already knows the real state. This deployment's
+// "Arm" Tap-to-Run scene enables the "Alarm" automation (rule_id below);
+// "Disarm" disables it (and switches the siren off) — so its current
+// enable/disable status is an authoritative stand-in for เฝ้าบ้าน/ไปพัก at
+// startup. Optional — TUYA_ALARM_AUTOMATION_ID depends on a specific
+// automation setup that may not exist/match in every deployment; if unset,
+// houseMode just starts unknown as before.
+const alarmAutomationId = process.env.TUYA_ALARM_AUTOMATION_ID;
+if (alarmAutomationId) {
+  tuyaRestClient
+    .getSceneRule(alarmAutomationId)
+    .then((rule) => {
+      const mode = rule.status === 'enable' ? 'arm' : 'disarm';
+      houseMode.setMode(mode);
+      logger.info(`[HOUSE_MODE] Recovered mode at boot from Tuya "Alarm" automation: ${mode}`);
+    })
+    .catch((err) => logger.error('[HOUSE_MODE] Failed to recover mode at boot:', err));
 }
 
 ```
@@ -1199,6 +1309,14 @@ function waterLeak(value) {
   return { eventType: 'WATER_LEAK' };
 }
 
+function remoteArmed() {
+  return { eventType: 'REMOTE_ARMED' };
+}
+
+function remoteDisarmed() {
+  return { eventType: 'REMOTE_DISARMED' };
+}
+
 const DP_PROFILES = {
   // Contact Sensor (door/window) — confirmed via Tuya IoT Platform Product
   // Category for ประตูระเบียงห้องพ่อ, ประตูครัว, ประตูหน้าบ้าน (2026-08-15).
@@ -1234,14 +1352,19 @@ const DP_PROFILES = {
   // carried over unchanged from the pre-dpProfiles normalizer.
   watersensor: {
     watersensor_state: waterLeak
+  },
+  // Security Remote Control (Emergency Button / รีโมท) — its arm/disarmed/
+  // home/sos Enum DPs are confirmed real (TUYA_DEVICE_DP_REGISTRY.md) but
+  // not externally commandable (battery-powered Zigbee end device — see
+  // Section 8.13 on triggerScene). Only `arm`/`disarmed` are handled: these
+  // sync houseMode/quietMode the same way the LINE-side เฝ้าบ้าน/ไปพัก
+  // commands do (app.js, on REMOTE_ARMED/REMOTE_DISARMED) — the hardware
+  // counterpart to interactionRouter.js's _executeArmDisarm. `home`/`sos`
+  // still fall through to UNKNOWN_EVENT.
+  sos: {
+    arm: remoteArmed,
+    disarmed: remoteDisarmed
   }
-  // `sos` (Emergency Button / รีโมท) intentionally has no entry. Its
-  // arm/disarmed/home/sos Enum DPs are confirmed real (TUYA_DEVICE_DP_
-  // REGISTRY.md) but not externally commandable (battery-powered Zigbee end
-  // device — see Section 8.13 on triggerScene). Devices registered with
-  // dpProfile "sos" safely fall through to UNKNOWN_EVENT for every DP; this
-  // app never alerts on this device's own DPs, only queries/commands other
-  // devices and triggers Scenes.
 };
 
 // Increment 2 (device control): which DP code a profile's on/off toggle
@@ -1730,7 +1853,7 @@ history is a query action, same category as the status card itself),
 opening `historyCard.js`'s view (Section 8.18). `buildAllStatusTable()` now
 also takes an optional `modeInfo` (`{ armMode, quietMinutes }`), rendered by
 `buildModeSection()` as one or two lines above the device rows — armMode
-from `houseMode.js` (Section 8.17, best-effort, labeled "ล่าสุดจากบอท" since
+from `houseMode.js` (Section 8.17, best-effort, labeled "ล่าสุดที่ทราบ" since
 it's not a verified live query) and quietMinutes from `quietMode.js`
 (Section 8.16; `null` renders as an indefinite "จนกว่าจะเฝ้าบ้านหรือ
 กลับบ้าน" line rather than a countdown, distinct from a plain number).
@@ -1928,17 +2051,18 @@ function buildConfirmPrompt(device, cmd) {
 }
 
 // Mode summary lines shown above the device table — armMode reflects only
-// the last เฝ้าบ้าน/ไปพัก *this bot* itself triggered (houseMode.js), not a
-// verified live query against Tuya, so it's labeled as such rather than
-// presented as fact. Omitted entirely if neither is currently known/active,
-// rather than showing a misleading "unknown" placeholder.
+// the last เฝ้าบ้าน/ไปพัก this app observed, either via LINE or the physical
+// remote (houseMode.js), not a verified live query against Tuya, so it's
+// labeled as such rather than presented as fact. Omitted entirely if
+// neither is currently known/active, rather than showing a misleading
+// "unknown" placeholder.
 function buildModeSection({ armMode, quietMinutes } = {}) {
   const lines = [];
 
   if (armMode === 'arm') {
-    lines.push('🛡️ เฝ้าบ้าน (ล่าสุดจากบอท)');
+    lines.push('🛡️ เฝ้าบ้าน (ล่าสุดที่ทราบ)');
   } else if (armMode === 'disarm') {
-    lines.push('🛌 ไปพัก (ล่าสุดจากบอท)');
+    lines.push('🛌 ไปพัก (ล่าสุดที่ทราบ)');
   }
 
   // quietMinutes: null = indefinite (quietMode.remainingMinutes() returns
@@ -1957,6 +2081,30 @@ function buildModeSection({ armMode, quietMinutes } = {}) {
       type: 'box',
       layout: 'vertical',
       contents: lines.map((text) => ({ type: 'text', text, size: 'sm', weight: 'bold' }))
+    },
+    { type: 'separator', margin: 'md' }
+  ];
+}
+
+// LINE's monthly push-message quota (lineMessaging.js's getQuota, Section
+// 8.7) — best effort, same tier as armMode/quietMinutes above: omitted
+// entirely rather than shown as "unknown" if the query failed or wasn't
+// attempted. `quota` is LINE's raw MessageQuotaResponse ({ type:
+// 'limited'|'none', value? }); `type: 'none'` means an unlimited plan, so
+// there's no denominator to show.
+function buildQuotaSection({ quota, quotaConsumed } = {}) {
+  if (quota == null || quotaConsumed == null) return [];
+
+  const text =
+    quota.type === 'limited' && typeof quota.value === 'number'
+      ? `📨 ส่งข้อความไปแล้ว ${quotaConsumed}/${quota.value} ครั้งเดือนนี้`
+      : `📨 ส่งข้อความไปแล้ว ${quotaConsumed} ครั้งเดือนนี้ (ไม่จำกัดโควต้า)`;
+
+  return [
+    {
+      type: 'box',
+      layout: 'vertical',
+      contents: [{ type: 'text', text, size: 'sm', color: '#888888' }]
     },
     { type: 'separator', margin: 'md' }
   ];
@@ -2023,17 +2171,18 @@ function buildStatusRow(device, rawStatus, error) {
 }
 
 // `results` is an array of { device, rawStatus, error } — one entry per
-// queryable device, in registry order. `modeInfo` ({ armMode, quietMinutes })
-// is optional context beyond device status (Increment 3). Single Flex
-// Bubble, one row per device — reads as a table, no swiping needed (the
-// earlier Flex Carousel version required tapping through one card per
-// device, which was harder to scan at a glance for the whole house at once).
+// queryable device, in registry order. `modeInfo` ({ armMode, quietMinutes,
+// quota, quotaConsumed }) is optional context beyond device status
+// (Increment 3, plus Increment 4's LINE quota). Single Flex Bubble, one row
+// per device — reads as a table, no swiping needed (the earlier Flex
+// Carousel version required tapping through one card per device, which was
+// harder to scan at a glance for the whole house at once).
 function buildAllStatusTable(results, modeInfo) {
   const deviceRows = results.flatMap(({ device, rawStatus, error }, i) => {
     const row = buildStatusRow(device, rawStatus, error);
     return i === 0 ? [row] : [{ type: 'separator', margin: 'md' }, row];
   });
-  const rows = [...buildModeSection(modeInfo), ...deviceRows];
+  const rows = [...buildModeSection(modeInfo), ...buildQuotaSection(modeInfo), ...deviceRows];
 
   return {
     type: 'flex',
@@ -2227,6 +2376,17 @@ async function triggerScene(ruleId) {
   return request('POST', `/v2.0/cloud/scene/rule/${ruleId}/actions/trigger`, { accessToken });
 }
 
+// Reads a Scene/Automation Linkage Rule's current detail, including its
+// `status` ("enable"/"disable"). Used at boot (app.js, Section 8.9) to
+// recover houseMode.js's armed/disarmed state from Tuya's own automation
+// state instead of starting every restart with an unknown mode — see
+// TUYA_ALARM_AUTOMATION_ID in Section 4's .env.example. Same rule_id
+// concept as triggerScene() above, just GET instead of a trigger POST.
+async function getSceneRule(ruleId) {
+  const accessToken = await getAccessToken();
+  return request('GET', `/v2.0/cloud/scene/rule/${ruleId}`, { accessToken });
+}
+
 // Device operation history — 7-day free retention per Tuya's Device Log
 // Service. Defaults to the full 7-day window with size=10 — a wider time
 // window with the same row cap can never return fewer rows than a narrower
@@ -2266,7 +2426,7 @@ async function getDeviceLogs(deviceId, { startTime, endTime, size = 10 } = {}) {
   return request('GET', `/v1.0/devices/${deviceId}/logs?${sortedQuery}`, { accessToken });
 }
 
-module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getDeviceLogs };
+module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getSceneRule, getDeviceLogs };
 ```
 
 **Increment 3 note on the Device Log endpoint's quirks**, both discovered
@@ -2318,6 +2478,26 @@ response shown below).
    (e.g. enabling the arm automation, sending a notification) run exactly as
    they would from a manual tap in the Smart Life app.
 
+4. **Find the arm/disarm automation's `rule_id`** (for
+   `TUYA_ALARM_AUTOMATION_ID`, Increment 4) — same *Query Linkage Rules*
+   response as step 2, but this time filter for `"type": "automation"`.
+   Confirmed live for this deployment: the "Arm" Tap-to-Run scene's actions
+   enable a `"type": "automation"` entry named "Alarm"; "Disarm" disables
+   that same entry (and switches the siren off). That automation's
+   `rule_id` is what goes into `TUYA_ALARM_AUTOMATION_ID` — verify against
+   your own account, since the exact automation name/wiring depends on how
+   your Scenes were built in the Smart Life app, not on anything this app
+   controls.
+
+5. **Read it** (what `getSceneRule()` does under the hood):
+
+   ```
+   GET /v2.0/cloud/scene/rule/{rule_id}
+   ```
+
+   Returns the rule's full detail, including `status` ("enable"/"disable")
+   — this is what app.js's boot-time houseMode recovery reads (Section 8.9).
+
 ### 8.14 Interaction Router (`src/services/interactionRouter.js`)
 
 Dispatches parsed webhook events: an argument-less text trigger opens the
@@ -2334,9 +2514,13 @@ reachable via `a=cmd` after `a=confirm` built the prompt) and
 `a=armconfirm` built the prompt). `_executeArmDisarm` calls
 `tuyaRestClient.triggerScene()` (Section 8.13) with
 `TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID`, not a direct device command —
-see Section 8.13's note on why. `_replyAllStatus` queries every queryable
-device in parallel via `Promise.allSettled`, so one device's failed query
-doesn't block the others from showing real status in the same table reply.
+see Section 8.13's note on why. `_replyAllStatus` delegates to
+`statusReport.buildReport()` (Section 8.19), which queries every queryable
+device in parallel via `Promise.allSettled` (so one device's failed query
+doesn't block the others from showing real status in the same table reply)
+alongside houseMode/quietMode/LINE-quota context — the same builder the
+automatic daily summary (Section 8.20) uses, so the two can never drift out
+of sync with each other.
 
 **Increment 3 additions.** `_executeArmDisarm` now also drives quiet mode:
 ไปพัก enters `quietMode.setIndefiniteQuiet()` (routine household activity
@@ -2357,6 +2541,7 @@ const { CONTROL_DP } = require('../config/dpProfiles');
 const tuyaRestClient = require('./tuyaRestClient');
 const quietMode = require('./quietMode');
 const houseMode = require('./houseMode');
+const statusReport = require('./statusReport');
 const {
   buildRootMenu,
   buildCategoryMenu,
@@ -2369,7 +2554,7 @@ const {
   queryableDevices,
   armDisarmAvailable
 } = require('../templates/menuBuilders');
-const { buildStatusCard, buildAllStatusTable, buildConfirmPrompt } = require('../templates/statusCard');
+const { buildStatusCard, buildConfirmPrompt } = require('../templates/statusCard');
 const { buildHistoryMessage } = require('../templates/historyCard');
 const logger = require('../utils/logger');
 
@@ -2725,34 +2910,19 @@ class InteractionRouter {
     }
   }
 
-  // Queries every queryable device's status in parallel — a partial failure
-  // (one device's Tuya call errors/times out) still shows every device that
-  // did succeed, rather than failing the whole table over one bad query.
+  // Queries every queryable device's status in parallel (plus houseMode/
+  // quietMode/LINE-quota context) via statusReport.js, shared with the
+  // automatic daily summary (dailyReport.js, Section 8.20) — a partial
+  // device-query failure still shows every device that did succeed, rather
+  // than failing the whole table over one bad query.
   async _replyAllStatus(replyToken) {
-    const devices = queryableDevices();
-    if (devices.length === 0) {
+    if (queryableDevices().length === 0) {
       await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังไม่มีอุปกรณ์ที่เช็คสถานะได้ครับ' });
       return;
     }
 
-    const settled = await Promise.allSettled(
-      devices.map((device) => tuyaRestClient.getDeviceStatus(device.id))
-    );
-
-    const results = devices.map((device, i) => {
-      const outcome = settled[i];
-      if (outcome.status === 'fulfilled') {
-        return { device, rawStatus: outcome.value };
-      }
-      logger.error(`[INTERACTION_ROUTER] Status query failed for ${device.id}:`, outcome.reason);
-      return { device, error: true };
-    });
-
-    const modeInfo = {
-      armMode: houseMode.getMode(),
-      quietMinutes: quietMode.isQuiet() ? quietMode.remainingMinutes() : 0
-    };
-    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results, modeInfo));
+    const message = await statusReport.buildReport(this.lineService);
+    await this.lineService.replyMessage(replyToken, message);
   }
 
   async _replyDeviceStatus(replyToken, deviceId) {
@@ -3056,26 +3226,38 @@ module.exports = {
 
 ### 8.17 House Mode (`src/services/houseMode.js`)
 
-Best-effort, in-memory record of the last เฝ้าบ้าน/ไปพัก *this bot itself*
-successfully triggered — explicitly **not** a verified live query against
-Tuya. `interactionRouter.js`'s `_executeArmDisarm` (Section 8.14) already
-treats Tuya's own automation engine as the sole authoritative armed/disarmed
-state; this module exists only so รายงาน (`statusCard.js`'s `buildAllStatusTable`,
-Section 8.12) has something to display. It goes stale/wrong the moment
-someone arms or disarms directly from the Smart Life app instead of through
-this bot — that's why every รายงาน line sourced from it is labeled
-"(ล่าสุดจากบอท)" rather than presented as fact. Lost on restart, same tier
-as `quietMode.js`'s in-memory state.
+Best-effort, in-memory record of the last เฝ้าบ้าน/ไปพัก this app observed —
+triggered via LINE (`interactionRouter.js`'s `_executeArmDisarm`, Section
+8.14), pressed on the physical Security Remote Control (`app.js`, on
+`REMOTE_ARMED`/`REMOTE_DISARMED` — see the `sos` profile in Section 8.5 and
+TUYA_DEVICE_DP_REGISTRY.md), or read back from Tuya's own "Alarm" automation
+at boot (`app.js`, `TUYA_ALARM_AUTOMATION_ID` — Section 8.9, 8.13's
+`getSceneRule`) — explicitly **not** a continuously verified live query
+against Tuya, just seeded from one at startup. Tuya's own automation engine
+remains the sole authoritative armed/disarmed state; this module exists only
+so รายงาน (`statusReport.js`'s `buildReport`, Section 8.19, feeding
+`statusCard.js`'s `buildAllStatusTable`, Section 8.12) has something to
+display. It still goes stale/wrong if someone arms or disarms directly from
+the Smart Life app instead of through this bot or the remote, or if
+`TUYA_ALARM_AUTOMATION_ID` is unset (then a restart still resets to unknown,
+same as before) — that's why every รายงาน line sourced from it is labeled
+"(ล่าสุดที่ทราบ)" rather than presented as fact. Same tier as `quietMode.js`'s
+in-memory state.
 
 ```javascript
-// Best-effort, in-memory record of the last เฝ้าบ้าน/ไปพัก this bot itself
-// successfully triggered — NOT a verified live query against Tuya. This app
-// deliberately tracks no authoritative armed/disarmed state of its own
-// (interactionRouter.js's _executeArmDisarm: "Tuya's automation engine
-// already is that state"); this is only for the รายงาน summary line, and
-// goes stale/wrong if someone arms or disarms directly from the Smart Life
-// app instead of through this bot. Lost on restart, same tier as
-// quietMode.js's state — a display nicety, not a security-relevant fact.
+// Best-effort, in-memory record of the last เฝ้าบ้าน/ไปพัก this app observed
+// — triggered via LINE (interactionRouter.js's _executeArmDisarm), pressed
+// on the physical Security Remote Control (app.js, on REMOTE_ARMED/
+// REMOTE_DISARMED), or read back from Tuya's own "Alarm" automation at boot
+// (app.js, TUYA_ALARM_AUTOMATION_ID) — NOT a continuously verified live
+// query against Tuya, just seeded from one at startup. This app otherwise
+// tracks no authoritative armed/disarmed state of its own ("Tuya's
+// automation engine already is that state"); this is only for the รายงาน
+// summary line, and still goes stale/wrong if someone arms or disarms
+// directly from the Smart Life app instead of through this bot or the
+// remote, or if TUYA_ALARM_AUTOMATION_ID is unset (then a restart still
+// resets to unknown, same as before). Same tier as quietMode.js's state — a
+// display nicety, not a security-relevant fact.
 let lastMode = null; // 'arm' | 'disarm' | null
 
 function setMode(mode) {
@@ -3159,6 +3341,170 @@ function buildHistoryMessage(device, logEntries) {
 module.exports = { buildHistoryMessage };
 ```
 
+### 8.19 Status Report Aggregator (`src/services/statusReport.js`)
+
+**Increment 4 addition.** Extracted so the manual รายงาน command
+(`interactionRouter.js`'s `_replyAllStatus`, Section 8.14) and the automatic
+daily summary (`dailyReport.js`, Section 8.20) build the exact same Flex
+message from a single implementation — before this, only the manual command
+existed, and duplicating its device-query + houseMode/quietMode assembly
+logic for the daily push risked the two silently drifting apart over time.
+LINE quota lookup (`lineService.getQuota()`, Section 8.7) runs in parallel
+with the device queries and is treated as best-effort, same tier as
+houseMode/quietMode: a failed quota lookup just omits that section
+(`buildQuotaSection`, Section 8.12) rather than failing the whole report.
+
+```javascript
+const tuyaRestClient = require('./tuyaRestClient');
+const houseMode = require('./houseMode');
+const quietMode = require('./quietMode');
+const { queryableDevices } = require('../templates/menuBuilders');
+const { buildAllStatusTable } = require('../templates/statusCard');
+const logger = require('../utils/logger');
+
+// Builds the full รายงาน Flex message — live Tuya device statuses plus
+// houseMode/quietMode/LINE-quota context. Shared by the interactive รายงาน
+// command (interactionRouter.js's _replyAllStatus) and the automatic daily
+// summary (dailyReport.js) so the two can never drift out of sync with each
+// other. `lineService` is passed in rather than required directly so this
+// stays a plain function of its inputs, same as the rest of this file's
+// dependencies.
+async function buildReport(lineService) {
+  const devices = queryableDevices();
+
+  const [settled, quotaResult] = await Promise.all([
+    Promise.allSettled(devices.map((device) => tuyaRestClient.getDeviceStatus(device.id))),
+    lineService.getQuota().catch((err) => {
+      // Best-effort, same tier as houseMode/quietMode below — a failed
+      // quota lookup omits that section (buildQuotaSection) rather than
+      // failing the whole report.
+      logger.error('[STATUS_REPORT] LINE quota query failed:', err);
+      return null;
+    })
+  ]);
+
+  const results = devices.map((device, i) => {
+    const outcome = settled[i];
+    if (outcome.status === 'fulfilled') {
+      return { device, rawStatus: outcome.value };
+    }
+    logger.error(`[STATUS_REPORT] Status query failed for ${device.id}:`, outcome.reason);
+    return { device, error: true };
+  });
+
+  const modeInfo = {
+    armMode: houseMode.getMode(),
+    quietMinutes: quietMode.isQuiet() ? quietMode.remainingMinutes() : 0,
+    quota: quotaResult?.quota ?? null,
+    quotaConsumed: quotaResult?.consumption?.totalUsage ?? null
+  };
+
+  return buildAllStatusTable(results, modeInfo);
+}
+
+module.exports = { buildReport };
+```
+
+### 8.20 Daily Summary Scheduler (`src/services/dailyReport.js`)
+
+**Increment 4 addition.** Entirely opt-in via `DAILY_REPORT_TIME`
+(`HH:mm`, in `TIMEZONE`) — same "quietly disables itself if unconfigured"
+pattern as เฝ้าบ้าน/ไปพัก's `TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID`.
+Computes the ms until the next occurrence of that time in the app's
+timezone (default Asia/Bangkok, which has no DST — so unlike a
+general-purpose cron implementation, no transition handling is needed) and
+fires a `setTimeout`, rescheduling itself 24h-equivalent later (by
+recomputing the next occurrence, not by a flat `+86400000`) every time it
+fires — successfully or not, so one bad day (a transient Tuya/LINE outage)
+doesn't kill the recurring schedule.
+
+Purely in-memory, deliberately: a restart around the scheduled time just
+skips that day's report rather than replaying it, same best-effort tier as
+houseMode.js/quietMode.js's in-memory state — not worth a persistence layer
+for a daily nicety. Pushes directly via `lineService.pushMessage()` rather
+than routing through `eventCorrelator.js`, so it always bypasses quiet
+mode/ไปพัก entirely — a deliberate daily heartbeat shouldn't go missing
+during a quiet period the same way routine door/motion alerts are meant to.
+
+```javascript
+const logger = require('../utils/logger');
+const statusReport = require('./statusReport');
+
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+// ms until the next occurrence of `hhmm` (HH:mm) in the app's configured
+// timezone (TIMEZONE, default Asia/Bangkok — no DST, so no transition
+// handling is needed here unlike a general-purpose cron implementation).
+// Wraps to tomorrow if that time has already passed today.
+function msUntilNext(hhmm) {
+  const [hour, minute] = hhmm.split(':').map(Number);
+  const now = new Date();
+
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+    .formatToParts(now)
+    .reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+
+  const nowSeconds = Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second);
+  const targetSeconds = hour * 3600 + minute * 60;
+
+  let diffSeconds = targetSeconds - nowSeconds;
+  if (diffSeconds <= 0) diffSeconds += 24 * 3600;
+  return diffSeconds * 1000;
+}
+
+// Starts the daily รายงาน push, if DAILY_REPORT_TIME is set — feature is
+// entirely opt-in, same "quietly disables itself if unconfigured" pattern
+// as เฝ้าบ้าน/ไปพัก's TUYA_ARM_SCENE_ID/TUYA_DISARM_SCENE_ID. Purely
+// in-memory: a restart around the scheduled time just skips that day's
+// report rather than replaying it — same best-effort tier as houseMode.js/
+// quietMode.js's in-memory state, not worth a persistence layer for a daily
+// nicety. Deliberately pushes directly via lineService rather than routing
+// through eventCorrelator, so it always bypasses quiet mode/ไปพัก — a
+// deliberate daily heartbeat shouldn't go missing during a quiet period the
+// same way routine door/motion alerts are meant to.
+function start(lineService) {
+  const time = process.env.DAILY_REPORT_TIME;
+  if (!time) return;
+
+  if (!TIME_RE.test(time)) {
+    logger.error(`[DAILY_REPORT] Invalid DAILY_REPORT_TIME "${time}" — expected HH:mm. Daily summary disabled.`);
+    return;
+  }
+
+  const scheduleNext = () => {
+    const delay = msUntilNext(time);
+    logger.info(`[DAILY_REPORT] Next summary in ${Math.round(delay / 60000)} minute(s)`);
+
+    setTimeout(async () => {
+      try {
+        const message = await statusReport.buildReport(lineService);
+        await lineService.pushMessage(message);
+        logger.info('[DAILY_REPORT] Sent daily summary');
+      } catch (err) {
+        logger.error('[DAILY_REPORT] Failed to send daily summary:', err);
+      } finally {
+        // Reschedule regardless of success/failure — one bad day (e.g. a
+        // transient Tuya/LINE outage) shouldn't kill the recurring schedule.
+        scheduleNext();
+      }
+    }, delay);
+  };
+
+  scheduleNext();
+}
+
+module.exports = { start };
+```
+
 ---
 
 ## 9. Definition of Done
@@ -3224,7 +3570,7 @@ Phase 1 is complete when all of the following hold:
 * Confirming ไปพัก automatically enters **indefinite** quiet mode (no auto-expiry) and says so in the reply; confirming เฝ้าบ้าน always clears quiet mode (even if a previous ไปพัก/เงียบๆหน่อย left it active) and says so in the reply — verified live via a routine door/motion event staying silent during ไปพัก and resuming after เฝ้าบ้าน or กลับบ้าน.
 * `ALARM_ON`, `ALARM_OFF`, and `WATER_LEAK` always push through regardless of quiet mode (manual or automatic-from-ไปพัก) — verified for both a standalone critical event and one folded into a `CHAIN_ESCALATION` alongside routine events (`containsCritical` flag).
 * Killing and restarting the process while quiet mode is active (timed or indefinite) produces one explicit "ระบบรีสตาร์ท...กลับมาแจ้งเตือนตามปกติแล้ว" push on the next boot, correctly describing whether the prior quiet was timed or indefinite — not silence, and not a duplicate message on a second consecutive restart (the marker file is consumed on read).
-* `รายงาน` (aliases: `/status all`, `สถานะทั้งหมด`) shows a mode summary line above the device table whenever `houseMode.js` has a last-known arm/disarm or quiet mode is active, each clearly labeled as best-effort ("ล่าสุดจากบอท") rather than a verified live state; the section is omitted entirely (not shown as "unknown") when neither applies.
+* `รายงาน` (aliases: `/status all`, `สถานะทั้งหมด`) shows a mode summary line above the device table whenever `houseMode.js` has a last-known arm/disarm (via LINE or the physical remote) or quiet mode is active, each clearly labeled as best-effort ("ล่าสุดที่ทราบ") rather than a verified live state; the section is omitted entirely (not shown as "unknown") when neither applies.
 * Status queries, device control, and arm/disarm all continue to work normally while quiet mode (timed or indefinite) is active — only the automatic Tuya-triggered alert push is ever suppressed, never a direct reply to a user-initiated tap.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
