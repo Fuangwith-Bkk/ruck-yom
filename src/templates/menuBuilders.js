@@ -83,6 +83,11 @@ function buildRootMenu() {
     });
   }
 
+  items.push({
+    type: 'action',
+    action: { type: 'postback', label: '🤫 เงียบๆ', data: 'a=quietprompt', displayText: '🤫 เงียบๆหน่อย' }
+  });
+
   return {
     type: 'text',
     text: 'มีอะไรให้ช่วยครับ',
@@ -111,9 +116,9 @@ function buildCategoryMenu() {
       type: 'action',
       action: {
         type: 'postback',
-        label: '📋 ทั้งหมด',
+        label: '📊 รายงาน',
         data: 'a=all',
-        displayText: '📋 เช็คสถานะทั้งหมด'
+        displayText: '📊 รายงาน'
       }
     }
   ];
@@ -167,7 +172,7 @@ function buildGreeting(botName) {
     },
     {
       type: 'action',
-      action: { type: 'postback', label: '📊 สถานะทั้งหมด', data: 'a=all', displayText: '📊 สถานะทั้งหมด' }
+      action: { type: 'postback', label: '📊 รายงาน', data: 'a=all', displayText: '📊 รายงาน' }
     }
   ];
 
@@ -184,6 +189,11 @@ function buildGreeting(botName) {
     );
   }
 
+  items.push({
+    type: 'action',
+    action: { type: 'postback', label: '🤫 เงียบๆ', data: 'a=quietprompt', displayText: '🤫 เงียบๆหน่อย' }
+  });
+
   return {
     type: 'text',
     text: `มีอะไรให้${botName}ช่วยครับ`,
@@ -191,10 +201,13 @@ function buildGreeting(botName) {
   };
 }
 
-// เฝ้าบ้าน (arm) / ไปพัก (disarm) picker — reached either by tapping
-// "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก directly as a
-// shortcut (interactionRouter.js), both converging on the same confirm step
-// (buildArmDisarmConfirm) before anything is actually sent.
+// เฝ้าบ้าน (arm) / ไปพัก (disarm) / กลับบ้าน picker — reached either by
+// tapping "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก/
+// กลับบ้าน directly as a shortcut (interactionRouter.js). เฝ้าบ้าน/ไปพัก
+// converge on the confirm step (buildArmDisarmConfirm) before anything is
+// actually sent; กลับบ้าน ("home now") cancels an active quiet period
+// (เงียบๆหน่อย) immediately, same non-destructive/no-confirm-needed
+// reasoning as ตื่นแล้ว.
 function buildHouseMenu() {
   return {
     type: 'text',
@@ -208,6 +221,10 @@ function buildHouseMenu() {
         {
           type: 'action',
           action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '🏡 กลับบ้าน', data: 'a=wake', displayText: '🏡 กลับบ้าน' }
         }
       ]
     }
@@ -238,6 +255,33 @@ function buildArmDisarmConfirm(mode) {
         {
           type: 'action',
           action: { type: 'postback', label: '❌ ยกเลิก', data: 'a=cancel', displayText: '❌ ยกเลิก' }
+        }
+      ]
+    }
+  };
+}
+
+// เงียบๆหน่อย picker — preset durations cover the common cases; the prompt
+// text also tells the user they can just type a number of minutes instead
+// (interactionRouter.js arms a short-lived "awaiting duration" flag right
+// after sending this, so a bare typed number that follows is understood).
+function buildQuietPrompt() {
+  return {
+    type: 'text',
+    text: 'เดี๋ยวจะไปเล่นข้างนอกสักครู่ ให้เงียบไปนานแค่ไหนดีครับ? (หรือพิมพ์จำนวนนาทีก็ได้ครับ)',
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: { type: 'postback', label: '30 นาที', data: 'a=quiet&min=30', displayText: '30 นาที' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '1 ชม', data: 'a=quiet&min=60', displayText: '1 ชม' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '2 ชม', data: 'a=quiet&min=120', displayText: '2 ชม' }
         }
       ]
     }
@@ -277,6 +321,7 @@ module.exports = {
   buildHouseMenu,
   buildArmDisarmConfirm,
   buildGreeting,
+  buildQuietPrompt,
   queryableDevices,
   controllableDevices,
   armDisarmAvailable

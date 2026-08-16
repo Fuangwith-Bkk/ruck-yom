@@ -1,6 +1,8 @@
 const deviceRegistry = require('../config/deviceRegistry');
 const { CONTROL_DP } = require('../config/dpProfiles');
 const tuyaRestClient = require('./tuyaRestClient');
+const quietMode = require('./quietMode');
+const houseMode = require('./houseMode');
 const {
   buildRootMenu,
   buildCategoryMenu,
@@ -9,10 +11,12 @@ const {
   buildHouseMenu,
   buildArmDisarmConfirm,
   buildGreeting,
+  buildQuietPrompt,
   queryableDevices,
   armDisarmAvailable
 } = require('../templates/menuBuilders');
 const { buildStatusCard, buildAllStatusTable, buildConfirmPrompt } = require('../templates/statusCard');
+const { buildHistoryMessage } = require('../templates/historyCard');
 const logger = require('../utils/logger');
 
 const BOT_NAME = process.env.LINE_BOT_NAME || 'รักยม';
@@ -25,15 +29,26 @@ const MENU_TRIGGERS = new Set(['เมนู']);
 const STATUS_MENU_TRIGGERS = new Set(['/status', 'สถานะ']);
 
 // Same shortcut idea as MENU_TRIGGERS, but jumps straight to the "all
-// devices" carousel (also reachable by tapping "📋 ทั้งหมด" in the category
-// menu) instead of the top-level menu.
-const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด']);
+// devices + mode" report table (also reachable by tapping "📊 รายงาน" in the
+// category menu/greeting) instead of the top-level menu. รายงาน is the
+// current label everywhere it's shown; the older สถานะทั้งหมด/-all phrasing
+// still works too since there's no reason to break it.
+const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด', 'รายงาน']);
 
 // Shortcut straight into the arm/disarm confirm step (buildArmDisarmConfirm)
 // — also reachable via "🏠 ดูแลบ้าน" in the root menu -> buildHouseMenu.
 // Both converge on the same confirm prompt; neither skips it.
 const ARM_TRIGGERS = new Set(['/arm', 'เฝ้าบ้าน']);
 const DISARM_TRIGGERS = new Set(['/disarm', 'ไปพัก']);
+
+// เงียบๆหน่อย opens the duration picker (same convergence pattern as
+// ARM/DISARM above); a plain /quiet N is a direct, stateless shortcut that
+// skips the picker entirely. ตื่นแล้ว cancels an active quiet period early.
+const QUIET_TRIGGERS = new Set(['เงียบๆหน่อย']);
+const WAKE_TRIGGERS = new Set(['ตื่นแล้ว', 'กลับบ้าน']);
+const QUIET_COMMAND_RE = /^\/quiet\s+(\d+)$/;
+const MIN_QUIET_MINUTES = 1;
+const MAX_QUIET_MINUTES = 1440;
 
 class InteractionRouter {
   constructor(lineService) {
@@ -80,6 +95,22 @@ class InteractionRouter {
       return;
     }
 
+    if (QUIET_TRIGGERS.has(text)) {
+      await this._replyQuietPrompt(event.replyToken);
+      return;
+    }
+
+    if (WAKE_TRIGGERS.has(text)) {
+      await this._wakeQuiet(event.replyToken);
+      return;
+    }
+
+    const quietMatch = text.match(QUIET_COMMAND_RE);
+    if (quietMatch) {
+      await this._activateQuiet(event.replyToken, Number(quietMatch[1]));
+      return;
+    }
+
     if (STATUS_MENU_TRIGGERS.has(text)) {
       await this.lineService.replyMessage(event.replyToken, buildCategoryMenu());
       return;
@@ -87,6 +118,15 @@ class InteractionRouter {
 
     if (MENU_TRIGGERS.has(text)) {
       await this.lineService.replyMessage(event.replyToken, buildRootMenu());
+      return;
+    }
+
+    // Fallback only — checked after every explicit command/keyword above, so
+    // an unambiguous command always wins. A bare positive integer is only
+    // treated as a quiet-mode duration if we're within the short window
+    // after _replyQuietPrompt armed it; otherwise it's just ignored text.
+    if (quietMode.isDurationPromptPending() && /^\d+$/.test(text)) {
+      await this._activateQuiet(event.replyToken, Number(text));
       return;
     }
 
@@ -111,6 +151,12 @@ class InteractionRouter {
     if (action === 'status') {
       const deviceId = params.get('id');
       await this._replyDeviceStatus(event.replyToken, deviceId);
+      return;
+    }
+
+    if (action === 'history') {
+      const deviceId = params.get('id');
+      await this._replyDeviceHistory(event.replyToken, deviceId);
       return;
     }
 
@@ -170,6 +216,22 @@ class InteractionRouter {
       return;
     }
 
+    if (action === 'quietprompt') {
+      await this._replyQuietPrompt(event.replyToken);
+      return;
+    }
+
+    if (action === 'quiet') {
+      const minutes = Number(params.get('min'));
+      await this._activateQuiet(event.replyToken, minutes);
+      return;
+    }
+
+    if (action === 'wake') {
+      await this._wakeQuiet(event.replyToken);
+      return;
+    }
+
     logger.debug('[INTERACTION_ROUTER] Unrecognized postback action:', action);
   }
 
@@ -187,9 +249,16 @@ class InteractionRouter {
   // (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than commanding the
   // Security Remote Control directly — that was tried first and rejected by
   // Tuya (error 2008), since that device can transmit button-press events
-  // but can't receive downlink commands. This app tracks no armed/disarmed
-  // state of its own; Tuya's automation engine (enabled/disabled by the
-  // scene's own actions) already is that state.
+  // but can't receive downlink commands. Tuya's own automation engine
+  // (enabled/disabled by the scene's own actions) remains the authoritative
+  // armed/disarmed state; houseMode.js only remembers the bot's own last
+  // action for display purposes (รายงาน), and is not treated as fact here.
+  //
+  // Also drives quiet mode automatically: ไปพัก ("I'm home, resting") means
+  // routine door/motion activity is just the household, not alert-worthy —
+  // enters indefinite quiet until เฝ้าบ้าน or กลับบ้าน. เฝ้าบ้าน ("watching
+  // the house," away) is the opposite: you want full vigilance, so it always
+  // resumes alerts even if a previous ไปพัก/เงียบๆหน่อย left quiet mode on.
   async _executeArmDisarm(replyToken, mode) {
     const sceneId = mode === 'arm' ? process.env.TUYA_ARM_SCENE_ID : process.env.TUYA_DISARM_SCENE_ID;
     const label = mode === 'arm' ? 'เฝ้าบ้าน' : 'ไปพัก';
@@ -200,12 +269,58 @@ class InteractionRouter {
 
     try {
       await tuyaRestClient.triggerScene(sceneId);
-      logger.info(`[INTERACTION_ROUTER] Triggered scene ${sceneId} (${mode})`);
-      await this.lineService.replyMessage(replyToken, { type: 'text', text: `${label}เรียบร้อยครับ` });
+      logger.info(`[INTERACTION_ROUTER] Triggered scene (${mode})`);
+      houseMode.setMode(mode);
+
+      let text = `${label}เรียบร้อยครับ`;
+      if (mode === 'disarm') {
+        quietMode.setIndefiniteQuiet();
+        text += ' 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ';
+      } else {
+        quietMode.clearQuiet();
+        text += ' แจ้งเตือนตามปกติครับ';
+      }
+      await this.lineService.replyMessage(replyToken, { type: 'text', text });
     } catch (err) {
       logger.error(`[INTERACTION_ROUTER] Arm/disarm scene trigger failed (${mode}):`, err);
       await this.lineService.replyMessage(replyToken, { type: 'text', text: `ขอโทษครับ ${label}ไม่สำเร็จ ลองใหม่อีกครั้งนะครับ` });
     }
+  }
+
+  async _replyQuietPrompt(replyToken) {
+    quietMode.armDurationPrompt();
+    await this.lineService.replyMessage(replyToken, buildQuietPrompt());
+  }
+
+  // Reachable from a preset tap (a=quiet), a direct /quiet N command, or a
+  // bare number typed while the duration prompt is pending — all three
+  // converge here. No Yes/No confirm gate, unlike device control/arm-disarm:
+  // this is non-destructive and self-expiring, so the two-tap pattern
+  // reserved for physical hardware changes doesn't apply.
+  async _activateQuiet(replyToken, minutes) {
+    quietMode.clearDurationPrompt();
+
+    if (!Number.isInteger(minutes) || minutes < MIN_QUIET_MINUTES || minutes > MAX_QUIET_MINUTES) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `บอกเป็นนาทีระหว่าง ${MIN_QUIET_MINUTES}-${MAX_QUIET_MINUTES} นะครับ`
+      });
+      return;
+    }
+
+    quietMode.setQuiet(minutes, () => this.lineService.pushMessage('กลับมาแล้วครับ ✅'));
+    await this.lineService.replyMessage(replyToken, { type: 'text', text: `เงียบไป ${minutes} นาทีนะครับ 🤫` });
+  }
+
+  async _wakeQuiet(replyToken) {
+    if (!quietMode.isQuiet()) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ตอนนี้ไม่ได้เงียบอยู่ครับ' });
+      return;
+    }
+    quietMode.clearQuiet();
+    // Wording kept neutral (not "I'm awake") since this same reply fires for
+    // both ตื่นแล้ว and กลับบ้าน — "I'm home" wouldn't fit an "awake" framing.
+    await this.lineService.replyMessage(replyToken, { type: 'text', text: 'กลับมาแจ้งเตือนตามปกติแล้วครับ ✅' });
   }
 
   async _replyConfirmPrompt(replyToken, deviceId, cmd) {
@@ -279,7 +394,11 @@ class InteractionRouter {
       return { device, error: true };
     });
 
-    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results));
+    const modeInfo = {
+      armMode: houseMode.getMode(),
+      quietMinutes: quietMode.isQuiet() ? quietMode.remainingMinutes() : 0
+    };
+    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results, modeInfo));
   }
 
   async _replyDeviceStatus(replyToken, deviceId) {
@@ -306,6 +425,31 @@ class InteractionRouter {
       await this.lineService.replyMessage(replyToken, {
         type: 'text',
         text: `ขอโทษครับ เช็คสถานะ ${device.name} ไม่ได้ในตอนนี้ ลองใหม่อีกครั้งนะครับ`
+      });
+    }
+  }
+
+  async _replyDeviceHistory(replyToken, deviceId) {
+    const device = deviceRegistry[deviceId];
+    if (!device) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: 'ไม่พบอุปกรณ์นี้แล้วครับ ลองเปิดเมนูใหม่อีกครั้งนะครับ'
+      });
+      return;
+    }
+
+    try {
+      const rawLogs = await tuyaRestClient.getDeviceLogs(deviceId);
+      await this.lineService.replyMessage(
+        replyToken,
+        buildHistoryMessage({ id: deviceId, ...device }, rawLogs.logs)
+      );
+    } catch (err) {
+      logger.error(`[INTERACTION_ROUTER] History query failed for ${deviceId}:`, err);
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `ขอโทษครับ ดูประวัติ ${device.name} ไม่ได้ในตอนนี้ ลองใหม่อีกครั้งนะครับ`
       });
     }
   }

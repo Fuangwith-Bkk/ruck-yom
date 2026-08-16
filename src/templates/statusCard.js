@@ -40,9 +40,12 @@ function describeState(category, dpMap) {
   }
 }
 
-// Bubble content only (no altText/message wrapper) — shared by both a
-// single-device status card and one card within the "all devices" carousel
-// (buildAllStatusCarousel), so the two views never drift out of sync.
+// Bubble content only (no altText/message wrapper) — used by the
+// single-device status card (buildStatusCard). The "all devices" table
+// (buildAllStatusTable/buildStatusRow below) renders its own compact row
+// layout instead of reusing this bubble; both draw on the same
+// dpMapFrom/describeState helpers so they can never disagree on a device's
+// state, just on how much of it they show.
 function buildStatusBubble(device, rawStatus, error) {
   const cat = DEVICE_CATEGORIES[device.category] || {};
 
@@ -96,16 +99,15 @@ function buildStatusBubble(device, rawStatus, error) {
   };
 }
 
-// Increment 2 (device control): a toggle Quick Reply attached to the status
-// card for any device whose dpProfile has a CONTROL_DP entry — currently
-// relay (tdq) and alarm (sgbj). The button reflects the opposite of the
-// device's current on/off state (currently off -> "turn on" button, and
-// vice versa) so tapping it always makes sense as the next action, not a
-// fixed "toggle" whose effect depends on state the user can't see at a
-// glance. Tapping only opens a confirm prompt (buildConfirmPrompt) — it
-// never sends the real command directly, per the "confirm before acting on
-// physical hardware" rule.
-function buildToggleQuickReply(device, dpMap) {
+// Increment 2 (device control): a toggle Quick Reply item for any device
+// whose dpProfile has a CONTROL_DP entry — currently relay (tdq) and alarm
+// (sgbj). The button reflects the opposite of the device's current on/off
+// state (currently off -> "turn on" button, and vice versa) so tapping it
+// always makes sense as the next action, not a fixed "toggle" whose effect
+// depends on state the user can't see at a glance. Tapping only opens a
+// confirm prompt (buildConfirmPrompt) — it never sends the real command
+// directly, per the "confirm before acting on physical hardware" rule.
+function toggleQuickReplyItem(device, dpMap) {
   const controlDp = CONTROL_DP[device.dpProfile];
   if (!controlDp) return null;
 
@@ -114,17 +116,28 @@ function buildToggleQuickReply(device, dpMap) {
   const label = isOn ? '⚪ ปิด' : '🔴 เปิด';
 
   return {
-    items: [
-      {
-        type: 'action',
-        action: {
-          type: 'postback',
-          label,
-          data: `a=confirm&id=${device.id}&cmd=${nextCmd}`,
-          displayText: label
-        }
-      }
-    ]
+    type: 'action',
+    action: {
+      type: 'postback',
+      label,
+      data: `a=confirm&id=${device.id}&cmd=${nextCmd}`,
+      displayText: label
+    }
+  };
+}
+
+// Increment 3: every queryable device (control or not) gets a "recent
+// activity" shortcut on its status card, not just controllable ones — device
+// history is a query action, same category as the status card itself.
+function historyQuickReplyItem(device) {
+  return {
+    type: 'action',
+    action: {
+      type: 'postback',
+      label: '🕘 ประวัติ',
+      data: `a=history&id=${device.id}`,
+      displayText: '🕘 ประวัติ'
+    }
   };
 }
 
@@ -132,16 +145,14 @@ function buildStatusCard(device, rawStatus) {
   const dpMap = dpMapFrom(rawStatus);
   const { stateText } = describeState(device.category, dpMap);
 
-  const message = {
+  const items = [toggleQuickReplyItem(device, dpMap), historyQuickReplyItem(device)].filter(Boolean);
+
+  return {
     type: 'flex',
     altText: `${device.name}: ${stateText}`,
-    contents: buildStatusBubble(device, rawStatus)
+    contents: buildStatusBubble(device, rawStatus),
+    quickReply: { items }
   };
-
-  const quickReply = buildToggleQuickReply(device, dpMap);
-  if (quickReply) message.quickReply = quickReply;
-
-  return message;
 }
 
 // Yes/No confirm step before a state-changing command actually fires —
@@ -239,26 +250,63 @@ function buildStatusRow(device, rawStatus, error) {
   };
 }
 
+// Mode summary lines shown above the device table — armMode reflects only
+// the last เฝ้าบ้าน/ไปพัก *this bot* itself triggered (houseMode.js), not a
+// verified live query against Tuya, so it's labeled as such rather than
+// presented as fact. Omitted entirely if neither is currently known/active,
+// rather than showing a misleading "unknown" placeholder.
+function buildModeSection({ armMode, quietMinutes } = {}) {
+  const lines = [];
+
+  if (armMode === 'arm') {
+    lines.push('🛡️ เฝ้าบ้าน (ล่าสุดจากบอท)');
+  } else if (armMode === 'disarm') {
+    lines.push('🛌 ไปพัก (ล่าสุดจากบอท)');
+  }
+
+  // quietMinutes: null = indefinite (quietMode.remainingMinutes() returns
+  // null while quietMode.isQuiet() is still true — see quietMode.js), a
+  // number > 0 = a timed countdown, 0/undefined = not quiet.
+  if (quietMinutes === null) {
+    lines.push('🤫 อยู่เงียบๆ (จนกว่าจะเฝ้าบ้านหรือกลับบ้าน)');
+  } else if (quietMinutes > 0) {
+    lines.push(`🤫 อยู่เงียบๆ อีก ${quietMinutes} นาที`);
+  }
+
+  if (lines.length === 0) return [];
+
+  return [
+    {
+      type: 'box',
+      layout: 'vertical',
+      contents: lines.map((text) => ({ type: 'text', text, size: 'sm', weight: 'bold' }))
+    },
+    { type: 'separator', margin: 'md' }
+  ];
+}
+
 // `results` is an array of { device, rawStatus, error } — one entry per
-// queryable device, in registry order. Single Flex Bubble, one row per
-// device — reads as a table, no swiping needed (the earlier Flex Carousel
-// version required tapping through one card per device, which was harder to
-// scan at a glance for the whole house at once).
-function buildAllStatusTable(results) {
-  const rows = results.flatMap(({ device, rawStatus, error }, i) => {
+// queryable device, in registry order. `modeInfo` ({ armMode, quietMinutes })
+// is optional context beyond device status (Increment 3). Single Flex
+// Bubble, one row per device — reads as a table, no swiping needed (the
+// earlier Flex Carousel version required tapping through one card per
+// device, which was harder to scan at a glance for the whole house at once).
+function buildAllStatusTable(results, modeInfo) {
+  const deviceRows = results.flatMap(({ device, rawStatus, error }, i) => {
     const row = buildStatusRow(device, rawStatus, error);
     return i === 0 ? [row] : [{ type: 'separator', margin: 'md' }, row];
   });
+  const rows = [...buildModeSection(modeInfo), ...deviceRows];
 
   return {
     type: 'flex',
-    altText: 'สถานะอุปกรณ์ทั้งหมด',
+    altText: 'รายงาน',
     contents: {
       type: 'bubble',
       header: {
         type: 'box',
         layout: 'vertical',
-        contents: [{ type: 'text', text: '📋 สถานะอุปกรณ์ทั้งหมด', weight: 'bold' }]
+        contents: [{ type: 'text', text: '📊 รายงาน', weight: 'bold' }]
       },
       body: {
         type: 'box',

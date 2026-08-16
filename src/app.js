@@ -12,6 +12,8 @@ const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
 const { createWebhookServer } = require('./webhook/server');
+const quietMode = require('./services/quietMode');
+const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
@@ -100,3 +102,21 @@ const port = process.env.PORT || 3000;
 webhookApp.listen(port, () => {
   logger.info(`Webhook server listening on port ${port}.`);
 });
+
+// Crash/restart recovery for quiet mode (Increment 3): quietMode.js's
+// in-memory quietUntil doesn't survive a restart, so without this, alerting
+// would silently resume mid-quiet-period with no one told. The marker file
+// is only ever deleted through a clean in-process path (manual wake or the
+// timer firing) — its presence here means the previous process died while
+// quiet mode was still active.
+const crashedQuietState = quietMode.readCrashMarker();
+if (crashedQuietState) {
+  // Two marker shapes: { indefinite: true } from ไปพัก (no expiry to report)
+  // vs { quietUntil, minutes } from a timed เงียบๆหน่อย/-quiet.
+  const detail = crashedQuietState.indefinite
+    ? 'เดิมอยู่ในโหมดไปพัก เงียบไม่จำกัดเวลา'
+    : `เดิมเงียบถึง ${getBangkokTime(new Date(crashedQuietState.quietUntil))}`;
+  lineService
+    .pushMessage(`ระบบรีสตาร์ทครับ กลับมาแจ้งเตือนตามปกติแล้วนะครับ (${detail})`)
+    .catch((err) => logger.error('[QUIET_MODE] Failed to send crash-recovery message:', err));
+}

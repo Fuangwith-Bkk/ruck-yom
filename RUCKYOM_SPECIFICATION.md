@@ -42,7 +42,7 @@
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 2: Interactive Status Query & Device Control (Increments 1-2 shipped)     │
+│ PHASE 2: Interactive Status Query & Device Control (Increments 1-3 shipped)     │
 │ • Express `/webhook` server receiving LINE chat events, signature-verified      │
 │ • Tap-only device menus (Quick Reply/Flex) — never requires typing a device     │
 │   name/ID; argument-less commands (`/status`, `เมนู`) are shortcuts into the     │
@@ -52,7 +52,14 @@
 │ • เฝ้าบ้าน/ไปพัก (arm/disarm) — triggers pre-built Tuya Tap-to-Run Scenes,        │
 │   not a direct device command (the security remote is a sleepy Zigbee end       │
 │   device that can't receive downlink commands — see Section 8.13)               │
-│ • Not yet built: breaker timer preset, `/history` device history                │
+│ • ประวัติ — per-device recent-activity view via Tuya's Device Log API            │
+│ • เงียบๆหน่อย (quiet mode) — app-level LINE-push suppression, timed or           │
+│   indefinite; ไปพัก auto-enters it, เฝ้าบ้าน/กลับบ้าน end it. Critical events     │
+│   (ALARM_ON/OFF, WATER_LEAK) always bypass it. No Tuya-side API exists to       │
+│   pause/resume the Message Service itself — see Section 8.16                    │
+│ • รายงาน — device status table plus a best-effort arm/disarm + quiet-mode        │
+│   summary line (houseMode.js, Section 8.17)                                     │
+│ • Not yet built: breaker timer preset                                           │
 └─────────────────────────┬───────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -147,6 +154,9 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 
+# Quiet-mode crash-recovery marker (runtime state, not app code)
+quiet-state.json
+
 ```
 
 ### Environment Variables Template (`.env.example`)
@@ -178,6 +188,9 @@ LINE_BOT_NAME=รักยม                            # Used as {{botName}} i
 
 # Event Consolidation
 EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidation window (ms). Optional, defaults to 15000.
+
+# Quiet Mode (เงียบๆหน่อย)
+QUIET_STATE_FILE=./quiet-state.json            # Crash-recovery marker file (existence-only signal, not real state persistence). Optional, defaults to ./quiet-state.json.
 
 # Logging (rotating file, in addition to console/pm2 output)
 LOG_DIR=./logs                                 # Optional, defaults to ./logs
@@ -224,19 +237,22 @@ ruck-yom/
 │   │   ├── sensorNormalizer.js     # Maps Tuya DP codes to event schema, via dpProfiles.js (data-driven, not hardcoded per-code branches)
 │   │   ├── templateEngine.js       # Renders localized Thai JSON templates
 │   │   ├── lineMessaging.js        # LINE messagingApi wrapper (push + reply)
-│   │   ├── eventCorrelator.js      # Consolidates bursts of events into one LINE message; see Section 8.8
-│   │   ├── tuyaRestClient.js       # [Phase 2] Hand-rolled Tuya OpenAPI client — token minting, signed status queries, device commands, and Tap-to-Run Scene triggering
-│   │   └── interactionRouter.js    # [Phase 2] Webhook event dispatch: trigger keyword/command -> menu -> status/control/arm-disarm
+│   │   ├── eventCorrelator.js      # Consolidates bursts of events into one LINE message, gated by quietMode.js; see Section 8.8
+│   │   ├── tuyaRestClient.js       # [Phase 2] Hand-rolled Tuya OpenAPI client — token minting, signed status/log queries, device commands, and Tap-to-Run Scene triggering
+│   │   ├── interactionRouter.js    # [Phase 2] Webhook event dispatch: trigger keyword/command -> menu -> status/control/arm-disarm/history/quiet-mode
+│   │   ├── quietMode.js            # [Phase 2, Increment 3] In-memory quiet-mode state (timed or indefinite) + crash-recovery marker file; see Section 8.16
+│   │   └── houseMode.js            # [Phase 2, Increment 3] Best-effort last-known arm/disarm, for รายงาน display only; see Section 8.17
 │   ├── templates/
 │   │   ├── securityAlerts.json     # Localized Thai alert message templates (Phase 1)
-│   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm), dynamic, not static JSON
-│   │   └── statusCard.js           # [Phase 2] Flex builders for a device's live status (single card + all-devices table) and Yes/No confirm prompts
+│   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm/quiet), dynamic, not static JSON
+│   │   ├── statusCard.js           # [Phase 2] Flex builders for a device's live status (single card + all-devices/mode table) and Yes/No confirm prompts
+│   │   └── historyCard.js          # [Phase 2, Increment 3] Per-device recent-activity view; see Section 8.18
 │   ├── utils/
-│   │   ├── dateTime.js             # Asia/Bangkok date-time formatter
+│   │   ├── dateTime.js             # Asia/Bangkok date-time formatters
 │   │   └── logger.js               # Console + size/day-rotated file logger, bounded by LOG_MAX_FILES
 │   ├── webhook/
 │   │   └── server.js               # [Phase 2] Express app: LINE signature-verified /webhook route
-│   └── app.js                      # Application bootstrap — Pulsar client + webhook server
+│   └── app.js                      # Application bootstrap — Pulsar client + webhook server + quiet-mode crash-recovery check
 └── tuya-pulsar-ws-node/            # Compiled local Pulsar SDK package
     ├── dist/                       # Compiled JavaScript output
     └── package.json
@@ -324,7 +340,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ```json
 {
   "name": "ruck-yom",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Smart Home Security Engine for Tuya & LINE Bot",
   "main": "src/app.js",
   "scripts": {
@@ -432,7 +448,31 @@ function getBangkokLogTimestamp(date = new Date()) {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
 }
 
-module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp };
+// DD MMM YY HH:mm:ss (e.g. "16 Aug 26 00:52:01") — used for device history
+// lines (historyCard.js, Section 8.18), which can span up to a week. Unlike
+// getBangkokTimestamp's DD/MM/YY, a named month reads faster at a glance
+// down a list of rows and can't be misread as MM/DD by a reader used to a
+// different date convention. Computes its own parts (like
+// getBangkokLogTimestamp above) rather than reusing getBangkokDateParts,
+// since that helper's month is numeric, not a name.
+function getBangkokHistoryTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
+    day: '2-digit',
+    month: 'short',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return `${parts.day} ${parts.month} ${parts.year} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp, getBangkokHistoryTimestamp };
 
 ```
 
@@ -654,8 +694,23 @@ event, that event is sent as its own normal standalone alert instead of
 being wrapped in a single-line `CHAIN_ESCALATION` — consolidation only
 kicks in once there's actually more than one thing to summarize.
 
+**Increment 3 addition — quiet mode gate + critical-event bypass.** `_push()`
+is the single choke point every LINE alert push goes through, so it's also
+where `quietMode.js` (Section 8.16) is checked: if quiet mode is active
+(timed, via เงียบๆหน่อย, or indefinite, via an automatic ไปพัก), the push is
+skipped and logged instead of sent. `CRITICAL_EVENT_TYPES` (`ALARM_ON`,
+`ALARM_OFF`, `WATER_LEAK`, and a pre-emptive `SMOKE_DETECTED` for when a
+smoke sensor is eventually added) always bypass this gate — neither a manual
+quiet request nor the automatic ไปพัก quiet should be able to hide a real
+emergency. Because a burst of routine events can still fold a critical one
+into a single `CHAIN_ESCALATION` message, `_flush()` also tags that
+synthetic event with `containsCritical` if any of its consolidated lines
+were critical, so the whole message still bypasses the gate rather than only
+a would-be-standalone critical event doing so.
+
 ```javascript
 const logger = require('../utils/logger');
+const quietMode = require('./quietMode');
 
 // Short, timestamp-free clause per eventType — used to build one line of a
 // CHAIN_ESCALATION message. Every eventType the normalizer can emit needs an
@@ -677,6 +732,17 @@ const CLAUSES = {
 // waiting out the full WINDOW_MS — there's no benefit to delaying once the
 // worst-case event has already happened.
 const TERMINAL_EVENT = 'ALARM_ON';
+
+// Genuinely critical eventTypes always push, regardless of quiet mode —
+// neither the manual เงียบๆหน่อย nor the automatic ไปพัก-indefinite quiet
+// should be able to hide a real emergency. ALARM_OFF rides along with
+// ALARM_ON so the "all clear" follow-up is never silently swallowed while
+// the ALARM_ON itself got through. SMOKE_DETECTED is included pre-emptively
+// for when a smoke sensor is added — no such device/dpProfile exists yet
+// (TUYA_DEVICE_DP_REGISTRY.md/dpProfiles.js), but the moment one is, it
+// should bypass quiet mode without anyone having to remember to update this
+// list again.
+const CRITICAL_EVENT_TYPES = new Set(['ALARM_ON', 'ALARM_OFF', 'WATER_LEAK', 'SMOKE_DETECTED']);
 
 const windowMs = () => Number(process.env.EVENT_CORRELATION_WINDOW_MS) || 15000;
 
@@ -749,11 +815,32 @@ class EventCorrelator {
     await this._push({
       eventType: 'CHAIN_ESCALATION',
       lines: lines.join('\n'),
-      timestamp: events[events.length - 1].timestamp
+      timestamp: events[events.length - 1].timestamp,
+      // CHAIN_ESCALATION's own eventType isn't itself critical, but if any
+      // consolidated line inside it is, the whole message must still bypass
+      // quiet mode — a real ALARM_ON shouldn't go missing just because it
+      // got folded into a burst with other, routine events.
+      containsCritical: followUps.some((e) => CRITICAL_EVENT_TYPES.has(e.eventType))
     });
   }
 
   async _push(event) {
+    // Quiet mode (Increment 3) suppresses only this final push — dedup,
+    // window buffering, and CHAIN_ESCALATION composition above all keep
+    // running exactly as normal, so state stays consistent and nothing
+    // needs to be replayed once the quiet period ends. Critical events
+    // (CRITICAL_EVENT_TYPES above) always bypass this gate — neither a
+    // manual เงียบๆหน่อย nor an automatic ไปพัก-quiet should be able to hide
+    // a real emergency.
+    const isCritical = CRITICAL_EVENT_TYPES.has(event.eventType) || event.containsCritical;
+    if (quietMode.isQuiet() && !isCritical) {
+      logger.info(`[QUIET_MODE] Suppressed (${event.eventType}) push for ${event.deviceName || 'chain escalation'}`);
+      return;
+    }
+    if (quietMode.isQuiet() && isCritical) {
+      logger.info(`[QUIET_MODE] Bypassed for critical event (${event.eventType})`);
+    }
+
     const text = this.templateEngine.render(event);
     // Exact rendered text, before it's sent — debug-only since it's
     // effectively a duplicate of the [ALERT_SENT] line below, but useful
@@ -771,6 +858,12 @@ module.exports = EventCorrelator;
 
 ### 8.9 Application Entry Point (`src/app.js`)
 
+**Increment 3 addition** — right after the webhook server starts listening,
+checks `quietMode.readCrashMarker()` (Section 8.16) once at boot. If it
+returns non-null, the previous process died while quiet mode was active;
+this pushes one explicit "restarted, alerting is back to normal" message to
+the group rather than silently resuming with no one told.
+
 ```javascript
 require('dotenv').config();
 const path = require('path');
@@ -786,6 +879,8 @@ const TemplateEngine = require('./services/templateEngine');
 const LineMessagingService = require('./services/lineMessaging');
 const EventCorrelator = require('./services/eventCorrelator');
 const { createWebhookServer } = require('./webhook/server');
+const quietMode = require('./services/quietMode');
+const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
 
 const deduplicator = new LRUDeduplicator(300000, 2000);
@@ -874,6 +969,24 @@ const port = process.env.PORT || 3000;
 webhookApp.listen(port, () => {
   logger.info(`Webhook server listening on port ${port}.`);
 });
+
+// Crash/restart recovery for quiet mode (Increment 3): quietMode.js's
+// in-memory quietUntil doesn't survive a restart, so without this, alerting
+// would silently resume mid-quiet-period with no one told. The marker file
+// is only ever deleted through a clean in-process path (manual wake or the
+// timer firing) — its presence here means the previous process died while
+// quiet mode was still active.
+const crashedQuietState = quietMode.readCrashMarker();
+if (crashedQuietState) {
+  // Two marker shapes: { indefinite: true } from ไปพัก (no expiry to report)
+  // vs { quietUntil, minutes } from a timed เงียบๆหน่อย/-quiet.
+  const detail = crashedQuietState.indefinite
+    ? 'เดิมอยู่ในโหมดไปพัก เงียบไม่จำกัดเวลา'
+    : `เดิมเงียบถึง ${getBangkokTime(new Date(crashedQuietState.quietUntil))}`;
+  lineService
+    .pushMessage(`ระบบรีสตาร์ทครับ กลับมาแจ้งเตือนตามปกติแล้วนะครับ (${detail})`)
+    .catch((err) => logger.error('[QUIET_MODE] Failed to send crash-recovery message:', err));
+}
 
 ```
 
@@ -1238,23 +1351,26 @@ This happened during Increment 1's build — the original `motion` label
 
 JS functions, not static JSON like `securityAlerts.json` — content is
 structurally dynamic (the category/device lists depend on what's actually in
-`deviceRegistry.json`, and the ดูแลบ้าน menu items only appear once scene IDs
-are configured). Postback `data` encodes the whole next navigation step as a
+`deviceRegistry.json`, and the ดูแลบ้าน/เงียบๆ menu items only appear once
+configured). Postback `data` encodes the whole next navigation step as a
 plain query string (`a=devices&c=door`, `a=status&id=<deviceId>`, `a=all`,
-`a=armconfirm&mode=arm`, `a=armexec&mode=disarm`, ...) — no server-side
-session is needed; every tap is a self-contained request, parsed with
-`URLSearchParams` in `interactionRouter.js` (Section 8.14).
+`a=armconfirm&mode=arm`, `a=armexec&mode=disarm`, `a=quiet&min=30`, `a=wake`,
+...) — no server-side session is needed; every tap is a self-contained
+request, parsed with `URLSearchParams` in `interactionRouter.js`
+(Section 8.14).
 
-`เมนู` opens the root `[📋 สถานะ / 🔧 จัดการ / 🏠 ดูแลบ้าน]` picker
-(`buildRootMenu()`); `/status`/`สถานะ` skip straight into the สถานะ branch's
-category picker (`buildCategoryMenu()`); `/status all`/`สถานะทั้งหมด` skip
-straight to the all-devices table; `/arm`/`เฝ้าบ้าน` and `/disarm`/`ไปพัก`
-skip straight to the arm/disarm Yes/No confirm step. `จัดการ`
-(`buildManageMenu()`) hides itself if no controllable device is registered;
-`🏠 ดูแลบ้าน` hides itself (`armDisarmAvailable()`) unless both
-`TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID` are set. Calling the bot by its
-own name (`LINE_BOT_NAME`) opens `buildGreeting()`, a friendlier entry point
-with direct shortcuts to เมนู/สถานะทั้งหมด/(เฝ้าบ้าน/ไปพัก if available).
+`เมนู` opens the root `[📋 สถานะ / 🔧 จัดการ / 🏠 ดูแลบ้าน / 🤫 เงียบๆ]`
+picker (`buildRootMenu()`); `/status`/`สถานะ` skip straight into the สถานะ
+branch's category picker (`buildCategoryMenu()`); `/status all`/
+`สถานะทั้งหมด`/`รายงาน` skip straight to the report table; `/arm`/`เฝ้าบ้าน`
+and `/disarm`/`ไปพัก` skip straight to the arm/disarm Yes/No confirm step.
+`จัดการ` (`buildManageMenu()`) hides itself if no controllable device is
+registered; `🏠 ดูแลบ้าน` hides itself (`armDisarmAvailable()`) unless both
+`TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID` are set; `🤫 เงียบๆ` is always
+offered (quiet mode itself never depends on Tuya scene config). Calling the
+bot by its own name (`LINE_BOT_NAME`) opens `buildGreeting()`, a friendlier
+entry point with direct shortcuts to เมนู/รายงาน/(เฝ้าบ้าน/ไปพัก if
+available)/เงียบๆ.
 
 ```javascript
 // Quick Reply builders for the tap-through menu flow. JS functions, not
@@ -1342,6 +1458,11 @@ function buildRootMenu() {
     });
   }
 
+  items.push({
+    type: 'action',
+    action: { type: 'postback', label: '🤫 เงียบๆ', data: 'a=quietprompt', displayText: '🤫 เงียบๆหน่อย' }
+  });
+
   return {
     type: 'text',
     text: 'มีอะไรให้ช่วยครับ',
@@ -1370,9 +1491,9 @@ function buildCategoryMenu() {
       type: 'action',
       action: {
         type: 'postback',
-        label: '📋 ทั้งหมด',
+        label: '📊 รายงาน',
         data: 'a=all',
-        displayText: '📋 เช็คสถานะทั้งหมด'
+        displayText: '📊 รายงาน'
       }
     }
   ];
@@ -1426,7 +1547,7 @@ function buildGreeting(botName) {
     },
     {
       type: 'action',
-      action: { type: 'postback', label: '📊 สถานะทั้งหมด', data: 'a=all', displayText: '📊 สถานะทั้งหมด' }
+      action: { type: 'postback', label: '📊 รายงาน', data: 'a=all', displayText: '📊 รายงาน' }
     }
   ];
 
@@ -1443,6 +1564,11 @@ function buildGreeting(botName) {
     );
   }
 
+  items.push({
+    type: 'action',
+    action: { type: 'postback', label: '🤫 เงียบๆ', data: 'a=quietprompt', displayText: '🤫 เงียบๆหน่อย' }
+  });
+
   return {
     type: 'text',
     text: `มีอะไรให้${botName}ช่วยครับ`,
@@ -1450,10 +1576,13 @@ function buildGreeting(botName) {
   };
 }
 
-// เฝ้าบ้าน (arm) / ไปพัก (disarm) picker — reached either by tapping
-// "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก directly as a
-// shortcut (interactionRouter.js), both converging on the same confirm step
-// (buildArmDisarmConfirm) before anything is actually sent.
+// เฝ้าบ้าน (arm) / ไปพัก (disarm) / กลับบ้าน picker — reached either by
+// tapping "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก/
+// กลับบ้าน directly as a shortcut (interactionRouter.js). เฝ้าบ้าน/ไปพัก
+// converge on the confirm step (buildArmDisarmConfirm) before anything is
+// actually sent; กลับบ้าน ("home now") cancels an active quiet period
+// (เงียบๆหน่อย) immediately, same non-destructive/no-confirm-needed
+// reasoning as ตื่นแล้ว.
 function buildHouseMenu() {
   return {
     type: 'text',
@@ -1467,6 +1596,10 @@ function buildHouseMenu() {
         {
           type: 'action',
           action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '🏡 กลับบ้าน', data: 'a=wake', displayText: '🏡 กลับบ้าน' }
         }
       ]
     }
@@ -1497,6 +1630,33 @@ function buildArmDisarmConfirm(mode) {
         {
           type: 'action',
           action: { type: 'postback', label: '❌ ยกเลิก', data: 'a=cancel', displayText: '❌ ยกเลิก' }
+        }
+      ]
+    }
+  };
+}
+
+// เงียบๆหน่อย picker — preset durations cover the common cases; the prompt
+// text also tells the user they can just type a number of minutes instead
+// (interactionRouter.js arms a short-lived "awaiting duration" flag right
+// after sending this, so a bare typed number that follows is understood).
+function buildQuietPrompt() {
+  return {
+    type: 'text',
+    text: 'เดี๋ยวจะไปเล่นข้างนอกสักครู่ ให้เงียบไปนานแค่ไหนดีครับ? (หรือพิมพ์จำนวนนาทีก็ได้ครับ)',
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: { type: 'postback', label: '30 นาที', data: 'a=quiet&min=30', displayText: '30 นาที' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '1 ชม', data: 'a=quiet&min=60', displayText: '1 ชม' }
+        },
+        {
+          type: 'action',
+          action: { type: 'postback', label: '2 ชม', data: 'a=quiet&min=120', displayText: '2 ชม' }
         }
       ]
     }
@@ -1536,6 +1696,7 @@ module.exports = {
   buildHouseMenu,
   buildArmDisarmConfirm,
   buildGreeting,
+  buildQuietPrompt,
   queryableDevices,
   controllableDevices,
   armDisarmAvailable
@@ -1550,18 +1711,29 @@ those intentionally suppress routine readings (e.g. healthy battery returns
 show the current battery level, healthy or not. Display and alerting are
 different jobs even when they read the same DPs.
 
-The "all devices" view (`buildAllStatusTable()`) renders as a single Flex
-Bubble with one row per device, not a Carousel — an earlier Carousel version
-required swiping through one card per device, harder to scan at a glance for
-the whole house at once. Each row stacks the device name above its
-state/battery (`buildStatusRow()`), rather than a horizontal 3-column
-layout — a long wrapped device name in a horizontal layout visually detached
-from the state/battery columns, which stayed pinned to the row's top;
-stacking avoids that regardless of name length. `buildToggleQuickReply()`
-attaches an on/off Quick Reply to a single-device status card only for
+The "all devices" view (renamed รายงาน, `buildAllStatusTable()`) renders as a
+single Flex Bubble with one row per device, not a Carousel — an earlier
+Carousel version required swiping through one card per device, harder to
+scan at a glance for the whole house at once. Each row stacks the device
+name above its state/battery (`buildStatusRow()`), rather than a horizontal
+3-column layout — a long wrapped device name in a horizontal layout visually
+detached from the state/battery columns, which stayed pinned to the row's
+top; stacking avoids that regardless of name length. `toggleQuickReplyItem()`
+adds an on/off Quick Reply item to a single-device status card only for
 devices whose `dpProfile` has a `CONTROL_DP` entry (`dpProfiles.js`) —
 tapping it only opens `buildConfirmPrompt()`'s Yes/No step, never sends the
 real command directly.
+
+**Increment 3 additions.** `historyQuickReplyItem()` adds a 🕘 ประวัติ button
+to *every* queryable device's status card (not just controllable ones —
+history is a query action, same category as the status card itself),
+opening `historyCard.js`'s view (Section 8.18). `buildAllStatusTable()` now
+also takes an optional `modeInfo` (`{ armMode, quietMinutes }`), rendered by
+`buildModeSection()` as one or two lines above the device rows — armMode
+from `houseMode.js` (Section 8.17, best-effort, labeled "ล่าสุดจากบอท" since
+it's not a verified live query) and quietMinutes from `quietMode.js`
+(Section 8.16; `null` renders as an indefinite "จนกว่าจะเฝ้าบ้านหรือ
+กลับบ้าน" line rather than a countdown, distinct from a plain number).
 
 ```javascript
 // Flex Bubble builder for a single device's live status. JS function, not
@@ -1606,9 +1778,12 @@ function describeState(category, dpMap) {
   }
 }
 
-// Bubble content only (no altText/message wrapper) — shared by both a
-// single-device status card and one row within the all-devices table, so
-// the two views never drift out of sync.
+// Bubble content only (no altText/message wrapper) — used by the
+// single-device status card (buildStatusCard). The "all devices" table
+// (buildAllStatusTable/buildStatusRow below) renders its own compact row
+// layout instead of reusing this bubble; both draw on the same
+// dpMapFrom/describeState helpers so they can never disagree on a device's
+// state, just on how much of it they show.
 function buildStatusBubble(device, rawStatus, error) {
   const cat = DEVICE_CATEGORIES[device.category] || {};
 
@@ -1662,14 +1837,15 @@ function buildStatusBubble(device, rawStatus, error) {
   };
 }
 
-// Increment 2 (device control): a toggle Quick Reply attached to the status
-// card for any device whose dpProfile has a CONTROL_DP entry — currently
-// relay (tdq) and alarm (sgbj). The button reflects the opposite of the
-// device's current on/off state so tapping it always makes sense as the
-// next action, not a fixed "toggle" whose effect depends on state the user
-// can't see at a glance. Tapping only opens a confirm prompt
-// (buildConfirmPrompt) — it never sends the real command directly.
-function buildToggleQuickReply(device, dpMap) {
+// Increment 2 (device control): a toggle Quick Reply item for any device
+// whose dpProfile has a CONTROL_DP entry — currently relay (tdq) and alarm
+// (sgbj). The button reflects the opposite of the device's current on/off
+// state (currently off -> "turn on" button, and vice versa) so tapping it
+// always makes sense as the next action, not a fixed "toggle" whose effect
+// depends on state the user can't see at a glance. Tapping only opens a
+// confirm prompt (buildConfirmPrompt) — it never sends the real command
+// directly, per the "confirm before acting on physical hardware" rule.
+function toggleQuickReplyItem(device, dpMap) {
   const controlDp = CONTROL_DP[device.dpProfile];
   if (!controlDp) return null;
 
@@ -1678,17 +1854,28 @@ function buildToggleQuickReply(device, dpMap) {
   const label = isOn ? '⚪ ปิด' : '🔴 เปิด';
 
   return {
-    items: [
-      {
-        type: 'action',
-        action: {
-          type: 'postback',
-          label,
-          data: `a=confirm&id=${device.id}&cmd=${nextCmd}`,
-          displayText: label
-        }
-      }
-    ]
+    type: 'action',
+    action: {
+      type: 'postback',
+      label,
+      data: `a=confirm&id=${device.id}&cmd=${nextCmd}`,
+      displayText: label
+    }
+  };
+}
+
+// Increment 3: every queryable device (control or not) gets a "recent
+// activity" shortcut on its status card, not just controllable ones — device
+// history is a query action, same category as the status card itself.
+function historyQuickReplyItem(device) {
+  return {
+    type: 'action',
+    action: {
+      type: 'postback',
+      label: '🕘 ประวัติ',
+      data: `a=history&id=${device.id}`,
+      displayText: '🕘 ประวัติ'
+    }
   };
 }
 
@@ -1696,16 +1883,14 @@ function buildStatusCard(device, rawStatus) {
   const dpMap = dpMapFrom(rawStatus);
   const { stateText } = describeState(device.category, dpMap);
 
-  const message = {
+  const items = [toggleQuickReplyItem(device, dpMap), historyQuickReplyItem(device)].filter(Boolean);
+
+  return {
     type: 'flex',
     altText: `${device.name}: ${stateText}`,
-    contents: buildStatusBubble(device, rawStatus)
+    contents: buildStatusBubble(device, rawStatus),
+    quickReply: { items }
   };
-
-  const quickReply = buildToggleQuickReply(device, dpMap);
-  if (quickReply) message.quickReply = quickReply;
-
-  return message;
 }
 
 // Yes/No confirm step before a state-changing command actually fires —
@@ -1740,6 +1925,41 @@ function buildConfirmPrompt(device, cmd) {
       ]
     }
   };
+}
+
+// Mode summary lines shown above the device table — armMode reflects only
+// the last เฝ้าบ้าน/ไปพัก *this bot* itself triggered (houseMode.js), not a
+// verified live query against Tuya, so it's labeled as such rather than
+// presented as fact. Omitted entirely if neither is currently known/active,
+// rather than showing a misleading "unknown" placeholder.
+function buildModeSection({ armMode, quietMinutes } = {}) {
+  const lines = [];
+
+  if (armMode === 'arm') {
+    lines.push('🛡️ เฝ้าบ้าน (ล่าสุดจากบอท)');
+  } else if (armMode === 'disarm') {
+    lines.push('🛌 ไปพัก (ล่าสุดจากบอท)');
+  }
+
+  // quietMinutes: null = indefinite (quietMode.remainingMinutes() returns
+  // null while quietMode.isQuiet() is still true — see quietMode.js), a
+  // number > 0 = a timed countdown, 0/undefined = not quiet.
+  if (quietMinutes === null) {
+    lines.push('🤫 อยู่เงียบๆ (จนกว่าจะเฝ้าบ้านหรือกลับบ้าน)');
+  } else if (quietMinutes > 0) {
+    lines.push(`🤫 อยู่เงียบๆ อีก ${quietMinutes} นาที`);
+  }
+
+  if (lines.length === 0) return [];
+
+  return [
+    {
+      type: 'box',
+      layout: 'vertical',
+      contents: lines.map((text) => ({ type: 'text', text, size: 'sm', weight: 'bold' }))
+    },
+    { type: 'separator', margin: 'md' }
+  ];
 }
 
 // One row of the "all devices" table: name on its own full-width line
@@ -1803,23 +2023,27 @@ function buildStatusRow(device, rawStatus, error) {
 }
 
 // `results` is an array of { device, rawStatus, error } — one entry per
-// queryable device, in registry order. Single Flex Bubble, one row per
-// device — reads as a table, no swiping needed.
-function buildAllStatusTable(results) {
-  const rows = results.flatMap(({ device, rawStatus, error }, i) => {
+// queryable device, in registry order. `modeInfo` ({ armMode, quietMinutes })
+// is optional context beyond device status (Increment 3). Single Flex
+// Bubble, one row per device — reads as a table, no swiping needed (the
+// earlier Flex Carousel version required tapping through one card per
+// device, which was harder to scan at a glance for the whole house at once).
+function buildAllStatusTable(results, modeInfo) {
+  const deviceRows = results.flatMap(({ device, rawStatus, error }, i) => {
     const row = buildStatusRow(device, rawStatus, error);
     return i === 0 ? [row] : [{ type: 'separator', margin: 'md' }, row];
   });
+  const rows = [...buildModeSection(modeInfo), ...deviceRows];
 
   return {
     type: 'flex',
-    altText: 'สถานะอุปกรณ์ทั้งหมด',
+    altText: 'รายงาน',
     contents: {
       type: 'bubble',
       header: {
         type: 'box',
         layout: 'vertical',
-        contents: [{ type: 'text', text: '📋 สถานะอุปกรณ์ทั้งหมด', weight: 'bold' }]
+        contents: [{ type: 'text', text: '📊 รายงาน', weight: 'bold' }]
       },
       body: {
         type: 'box',
@@ -1838,7 +2062,7 @@ module.exports = { buildStatusCard, buildAllStatusTable, buildConfirmPrompt };
 
 Increment 1: token minting + read-only status queries. Increment 2 adds
 signed POST command support (`sendCommand`, relay/alarm on-off) and
-`triggerScene` (เฝ้าบ้าน/ไปพัก).
+`triggerScene` (เฝ้าบ้าน/ไปพัก). Increment 3 adds `getDeviceLogs` (ประวัติ).
 
 `getAccessToken()` deduplicates concurrent in-flight mint requests via
 `pendingMint` — caught during testing when the "all devices" status query
@@ -2003,8 +2227,55 @@ async function triggerScene(ruleId) {
   return request('POST', `/v2.0/cloud/scene/rule/${ruleId}/actions/trigger`, { accessToken });
 }
 
-module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene };
+// Device operation history — 7-day free retention per Tuya's Device Log
+// Service. Defaults to the full 7-day window with size=10 — a wider time
+// window with the same row cap can never return fewer rows than a narrower
+// one (e.g. 24h), only ever the same or more, so this single query already
+// gives "whichever of {last 24h, last 10 rows} has more history" without
+// needing two separate calls: a busy device still gets capped at its most
+// recent 10 rows, while a quiet device reaches back as far as 7 days to
+// fill that same quota instead of coming back empty.
+//
+// The first endpoint this client calls with a query string — Tuya's
+// signature requires query params to appear in the signed URL sorted
+// alphabetically by key (ASCII order), not request/insertion order. Every
+// other call so far (status, commands, scene trigger) has no query string,
+// so this requirement was latent until now; sorting keys here keeps the
+// exact same string used for both the real request and its signature
+// (sign() just signs whatever `path` it's given), so they can never drift
+// apart.
+async function getDeviceLogs(deviceId, { startTime, endTime, size = 10 } = {}) {
+  const accessToken = await getAccessToken();
+  const now = Date.now();
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  const query = {
+    end_time: String(endTime ?? now),
+    size: String(size),
+    start_time: String(startTime ?? now - SEVEN_DAYS_MS),
+    // Required by Tuya (missing it causes "40000303 Parameter error!", not a
+    // default-to-all). type=7 is "data point report" — the only log
+    // category that maps to dpProfiles.js's resolvers (historyCard.js);
+    // online/offline/firmware/etc. (the other type codes) aren't state
+    // changes this app's DP_PROFILES vocabulary can interpret anyway.
+    type: '7'
+  };
+  const sortedQuery = Object.keys(query)
+    .sort()
+    .map((key) => `${key}=${query[key]}`)
+    .join('&');
+  return request('GET', `/v1.0/devices/${deviceId}/logs?${sortedQuery}`, { accessToken });
+}
+
+module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getDeviceLogs };
 ```
+
+**Increment 3 note on the Device Log endpoint's quirks**, both discovered
+live (a real device history query first returned `1004 sign invalid`, then
+`40000303 Parameter error!`, before working): query-string parameters must
+be alphabetically sorted for the HMAC signature to validate (undocumented in
+practice, though implied by Tuya's general signing scheme), and `type` is a
+required parameter despite Tuya's own docs not making that obvious — omitting
+it doesn't default to "all types," it's a hard error.
 
 #### Finding your `space_id` (home ID) and Scene `rule_id`s
 
@@ -2051,9 +2322,10 @@ response shown below).
 
 Dispatches parsed webhook events: an argument-less text trigger opens the
 root/category menu; a postback tap advances to the next step (device list,
-status card, control confirm, or arm/disarm confirm). All entry points
-converge on the same handler methods — a typed command or bot-name greeting
-is just a shortcut into a step a tap would also reach (Section 2).
+status card, control confirm, arm/disarm confirm, history, or quiet-mode
+prompt). All entry points converge on the same handler methods — a typed
+command or bot-name greeting is just a shortcut into a step a tap would also
+reach (Section 2).
 
 Two state-changing actions both require an explicit two-tap Yes/No confirm
 before anything real happens: `_executeCommand` (relay/alarm on-off, only
@@ -2066,10 +2338,25 @@ see Section 8.13's note on why. `_replyAllStatus` queries every queryable
 device in parallel via `Promise.allSettled`, so one device's failed query
 doesn't block the others from showing real status in the same table reply.
 
+**Increment 3 additions.** `_executeArmDisarm` now also drives quiet mode:
+ไปพัก enters `quietMode.setIndefiniteQuiet()` (routine household activity
+isn't alert-worthy while you're home), เฝ้าบ้าน always calls
+`quietMode.clearQuiet()` (full vigilance while away, even if a previous
+ไปพัก/เงียบๆหน่อย left quiet mode on) — and records `houseMode.setMode()`
+either way for รายงาน's best-effort mode display. Quiet mode itself has
+three converging activation paths (`_replyQuietPrompt`/`_activateQuiet`) —
+tapping a preset, typing `/quiet N`, or typing a bare number while
+`quietMode.isDurationPromptPending()` — and two ways to end early
+(`_wakeQuiet`, triggered by either ตื่นแล้ว or กลับบ้าน). `_replyDeviceHistory`
+(`a=history`) is a straightforward query action, same not-found/try-catch
+pattern as `_replyDeviceStatus`.
+
 ```javascript
 const deviceRegistry = require('../config/deviceRegistry');
 const { CONTROL_DP } = require('../config/dpProfiles');
 const tuyaRestClient = require('./tuyaRestClient');
+const quietMode = require('./quietMode');
+const houseMode = require('./houseMode');
 const {
   buildRootMenu,
   buildCategoryMenu,
@@ -2078,10 +2365,12 @@ const {
   buildHouseMenu,
   buildArmDisarmConfirm,
   buildGreeting,
+  buildQuietPrompt,
   queryableDevices,
   armDisarmAvailable
 } = require('../templates/menuBuilders');
 const { buildStatusCard, buildAllStatusTable, buildConfirmPrompt } = require('../templates/statusCard');
+const { buildHistoryMessage } = require('../templates/historyCard');
 const logger = require('../utils/logger');
 
 const BOT_NAME = process.env.LINE_BOT_NAME || 'รักยม';
@@ -2094,15 +2383,26 @@ const MENU_TRIGGERS = new Set(['เมนู']);
 const STATUS_MENU_TRIGGERS = new Set(['/status', 'สถานะ']);
 
 // Same shortcut idea as MENU_TRIGGERS, but jumps straight to the "all
-// devices" table (also reachable by tapping "📋 ทั้งหมด" in the category
-// menu) instead of the top-level menu.
-const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด']);
+// devices + mode" report table (also reachable by tapping "📊 รายงาน" in the
+// category menu/greeting) instead of the top-level menu. รายงาน is the
+// current label everywhere it's shown; the older สถานะทั้งหมด/-all phrasing
+// still works too since there's no reason to break it.
+const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด', 'รายงาน']);
 
 // Shortcut straight into the arm/disarm confirm step (buildArmDisarmConfirm)
 // — also reachable via "🏠 ดูแลบ้าน" in the root menu -> buildHouseMenu.
 // Both converge on the same confirm prompt; neither skips it.
 const ARM_TRIGGERS = new Set(['/arm', 'เฝ้าบ้าน']);
 const DISARM_TRIGGERS = new Set(['/disarm', 'ไปพัก']);
+
+// เงียบๆหน่อย opens the duration picker (same convergence pattern as
+// ARM/DISARM above); a plain /quiet N is a direct, stateless shortcut that
+// skips the picker entirely. ตื่นแล้ว cancels an active quiet period early.
+const QUIET_TRIGGERS = new Set(['เงียบๆหน่อย']);
+const WAKE_TRIGGERS = new Set(['ตื่นแล้ว', 'กลับบ้าน']);
+const QUIET_COMMAND_RE = /^\/quiet\s+(\d+)$/;
+const MIN_QUIET_MINUTES = 1;
+const MAX_QUIET_MINUTES = 1440;
 
 class InteractionRouter {
   constructor(lineService) {
@@ -2149,6 +2449,22 @@ class InteractionRouter {
       return;
     }
 
+    if (QUIET_TRIGGERS.has(text)) {
+      await this._replyQuietPrompt(event.replyToken);
+      return;
+    }
+
+    if (WAKE_TRIGGERS.has(text)) {
+      await this._wakeQuiet(event.replyToken);
+      return;
+    }
+
+    const quietMatch = text.match(QUIET_COMMAND_RE);
+    if (quietMatch) {
+      await this._activateQuiet(event.replyToken, Number(quietMatch[1]));
+      return;
+    }
+
     if (STATUS_MENU_TRIGGERS.has(text)) {
       await this.lineService.replyMessage(event.replyToken, buildCategoryMenu());
       return;
@@ -2156,6 +2472,15 @@ class InteractionRouter {
 
     if (MENU_TRIGGERS.has(text)) {
       await this.lineService.replyMessage(event.replyToken, buildRootMenu());
+      return;
+    }
+
+    // Fallback only — checked after every explicit command/keyword above, so
+    // an unambiguous command always wins. A bare positive integer is only
+    // treated as a quiet-mode duration if we're within the short window
+    // after _replyQuietPrompt armed it; otherwise it's just ignored text.
+    if (quietMode.isDurationPromptPending() && /^\d+$/.test(text)) {
+      await this._activateQuiet(event.replyToken, Number(text));
       return;
     }
 
@@ -2180,6 +2505,12 @@ class InteractionRouter {
     if (action === 'status') {
       const deviceId = params.get('id');
       await this._replyDeviceStatus(event.replyToken, deviceId);
+      return;
+    }
+
+    if (action === 'history') {
+      const deviceId = params.get('id');
+      await this._replyDeviceHistory(event.replyToken, deviceId);
       return;
     }
 
@@ -2239,6 +2570,22 @@ class InteractionRouter {
       return;
     }
 
+    if (action === 'quietprompt') {
+      await this._replyQuietPrompt(event.replyToken);
+      return;
+    }
+
+    if (action === 'quiet') {
+      const minutes = Number(params.get('min'));
+      await this._activateQuiet(event.replyToken, minutes);
+      return;
+    }
+
+    if (action === 'wake') {
+      await this._wakeQuiet(event.replyToken);
+      return;
+    }
+
     logger.debug('[INTERACTION_ROUTER] Unrecognized postback action:', action);
   }
 
@@ -2256,9 +2603,16 @@ class InteractionRouter {
   // (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than commanding the
   // Security Remote Control directly — that was tried first and rejected by
   // Tuya (error 2008), since that device can transmit button-press events
-  // but can't receive downlink commands. This app tracks no armed/disarmed
-  // state of its own; Tuya's automation engine (enabled/disabled by the
-  // scene's own actions) already is that state.
+  // but can't receive downlink commands. Tuya's own automation engine
+  // (enabled/disabled by the scene's own actions) remains the authoritative
+  // armed/disarmed state; houseMode.js only remembers the bot's own last
+  // action for display purposes (รายงาน), and is not treated as fact here.
+  //
+  // Also drives quiet mode automatically: ไปพัก ("I'm home, resting") means
+  // routine door/motion activity is just the household, not alert-worthy —
+  // enters indefinite quiet until เฝ้าบ้าน or กลับบ้าน. เฝ้าบ้าน ("watching
+  // the house," away) is the opposite: you want full vigilance, so it always
+  // resumes alerts even if a previous ไปพัก/เงียบๆหน่อย left quiet mode on.
   async _executeArmDisarm(replyToken, mode) {
     const sceneId = mode === 'arm' ? process.env.TUYA_ARM_SCENE_ID : process.env.TUYA_DISARM_SCENE_ID;
     const label = mode === 'arm' ? 'เฝ้าบ้าน' : 'ไปพัก';
@@ -2269,12 +2623,58 @@ class InteractionRouter {
 
     try {
       await tuyaRestClient.triggerScene(sceneId);
-      logger.info(`[INTERACTION_ROUTER] Triggered scene ${sceneId} (${mode})`);
-      await this.lineService.replyMessage(replyToken, { type: 'text', text: `${label}เรียบร้อยครับ` });
+      logger.info(`[INTERACTION_ROUTER] Triggered scene (${mode})`);
+      houseMode.setMode(mode);
+
+      let text = `${label}เรียบร้อยครับ`;
+      if (mode === 'disarm') {
+        quietMode.setIndefiniteQuiet();
+        text += ' 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ';
+      } else {
+        quietMode.clearQuiet();
+        text += ' แจ้งเตือนตามปกติครับ';
+      }
+      await this.lineService.replyMessage(replyToken, { type: 'text', text });
     } catch (err) {
       logger.error(`[INTERACTION_ROUTER] Arm/disarm scene trigger failed (${mode}):`, err);
       await this.lineService.replyMessage(replyToken, { type: 'text', text: `ขอโทษครับ ${label}ไม่สำเร็จ ลองใหม่อีกครั้งนะครับ` });
     }
+  }
+
+  async _replyQuietPrompt(replyToken) {
+    quietMode.armDurationPrompt();
+    await this.lineService.replyMessage(replyToken, buildQuietPrompt());
+  }
+
+  // Reachable from a preset tap (a=quiet), a direct /quiet N command, or a
+  // bare number typed while the duration prompt is pending — all three
+  // converge here. No Yes/No confirm gate, unlike device control/arm-disarm:
+  // this is non-destructive and self-expiring, so the two-tap pattern
+  // reserved for physical hardware changes doesn't apply.
+  async _activateQuiet(replyToken, minutes) {
+    quietMode.clearDurationPrompt();
+
+    if (!Number.isInteger(minutes) || minutes < MIN_QUIET_MINUTES || minutes > MAX_QUIET_MINUTES) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `บอกเป็นนาทีระหว่าง ${MIN_QUIET_MINUTES}-${MAX_QUIET_MINUTES} นะครับ`
+      });
+      return;
+    }
+
+    quietMode.setQuiet(minutes, () => this.lineService.pushMessage('กลับมาแล้วครับ ✅'));
+    await this.lineService.replyMessage(replyToken, { type: 'text', text: `เงียบไป ${minutes} นาทีนะครับ 🤫` });
+  }
+
+  async _wakeQuiet(replyToken) {
+    if (!quietMode.isQuiet()) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ตอนนี้ไม่ได้เงียบอยู่ครับ' });
+      return;
+    }
+    quietMode.clearQuiet();
+    // Wording kept neutral (not "I'm awake") since this same reply fires for
+    // both ตื่นแล้ว and กลับบ้าน — "I'm home" wouldn't fit an "awake" framing.
+    await this.lineService.replyMessage(replyToken, { type: 'text', text: 'กลับมาแจ้งเตือนตามปกติแล้วครับ ✅' });
   }
 
   async _replyConfirmPrompt(replyToken, deviceId, cmd) {
@@ -2348,7 +2748,11 @@ class InteractionRouter {
       return { device, error: true };
     });
 
-    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results));
+    const modeInfo = {
+      armMode: houseMode.getMode(),
+      quietMinutes: quietMode.isQuiet() ? quietMode.remainingMinutes() : 0
+    };
+    await this.lineService.replyMessage(replyToken, buildAllStatusTable(results, modeInfo));
   }
 
   async _replyDeviceStatus(replyToken, deviceId) {
@@ -2375,6 +2779,31 @@ class InteractionRouter {
       await this.lineService.replyMessage(replyToken, {
         type: 'text',
         text: `ขอโทษครับ เช็คสถานะ ${device.name} ไม่ได้ในตอนนี้ ลองใหม่อีกครั้งนะครับ`
+      });
+    }
+  }
+
+  async _replyDeviceHistory(replyToken, deviceId) {
+    const device = deviceRegistry[deviceId];
+    if (!device) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: 'ไม่พบอุปกรณ์นี้แล้วครับ ลองเปิดเมนูใหม่อีกครั้งนะครับ'
+      });
+      return;
+    }
+
+    try {
+      const rawLogs = await tuyaRestClient.getDeviceLogs(deviceId);
+      await this.lineService.replyMessage(
+        replyToken,
+        buildHistoryMessage({ id: deviceId, ...device }, rawLogs.logs)
+      );
+    } catch (err) {
+      logger.error(`[INTERACTION_ROUTER] History query failed for ${deviceId}:`, err);
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `ขอโทษครับ ดูประวัติ ${device.name} ไม่ได้ในตอนนี้ ลองใหม่อีกครั้งนะครับ`
       });
     }
   }
@@ -2440,6 +2869,296 @@ module.exports = { createWebhookServer };
 
 ```
 
+### 8.16 Quiet Mode (`src/services/quietMode.js`)
+
+In-memory only, same tier as `tuyaRestClient.js`'s token cache (Section
+8.13) — a boolean plus two timestamps with a max 24h lifetime doesn't
+warrant Phase 3's Redis state store, and the real security boundary for this
+whole feature is `server.js`'s `x-line-signature` check (Section 8.15), not
+where this state lives; quiet mode carries the same trust model `/arm`/
+`/disarm` already do. Two quiet states exist: **timed** (`setQuiet`, from
+เงียบๆหน่อย/`/quiet N`, auto-expires via `setTimeout`) and **indefinite**
+(`setIndefiniteQuiet`, from a successful ไปพัก, no timer — only an explicit
+เฝ้าบ้าน or กลับบ้าน ends it). `remainingMinutes()` returns `null` for the
+indefinite case specifically so callers (`statusCard.js`'s รายงาน) can
+distinguish "no countdown" from "not quiet at all" (`0`).
+
+The one on-disk piece is a minimal **crash-recovery marker**, not a
+persistence layer — it carries no authority of its own, it just tells the
+next boot whether the previous process died mid-quiet-period. It's deleted
+only through a clean in-process path (`clearQuiet()` or the timed wake
+firing), so its mere *presence* at boot (`readCrashMarker()`, consumed by
+`app.js`, Section 8.9) means the previous process died before either could
+run — no timestamp/staleness comparison needed. All file I/O is try/catch +
+log-only; a disk hiccup degrades to "no crash-recovery message," never to a
+thrown error inside `setQuiet`/`setIndefiniteQuiet`/`clearQuiet` or a boot
+failure.
+
+`armDurationPrompt()`/`isDurationPromptPending()`/`clearDurationPrompt()` are
+the one piece of short-lived conversational state in this otherwise fully
+stateless app (Section 2's decision #1) — a 2-minute TTL flag marking "we
+just asked for a duration, the next bare number typed in the group is
+probably the answer" (`interactionRouter.js`'s `_handleText` fallback,
+Section 8.14). Scoped to a single boolean with a short TTL rather than a
+general session store to keep the blast radius small: worst case, an
+unrelated number typed within that 2-minute window gets misread as a
+duration — self-correcting and observable (a confirmation reply fires
+immediately, and a wake message when it ends), never silent or permanent.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const logger = require('../utils/logger');
+
+// In-memory only, same tier as tuyaRestClient.js's token cache — a boolean +
+// two timestamps with a max 24h lifetime doesn't warrant Phase 3's Redis
+// state store, and the real security boundary here is server.js's
+// x-line-signature check, not where this state lives. The one on-disk piece
+// (below) is a minimal crash-recovery marker, not a persistence layer: it
+// carries no authority of its own, it just tells the next boot whether the
+// previous process died mid-quiet-period.
+const STATE_FILE = process.env.QUIET_STATE_FILE || path.join(__dirname, '../../quiet-state.json');
+
+let quietUntil = null;
+// Set by ไปพัก (disarm) — quiet with no timer/expiry, since "I'm home
+// resting" can reasonably last hours, not a fixed N-minute countdown. Only
+// cleared by an explicit เฝ้าบ้าน or กลับบ้าน (interactionRouter.js), never
+// auto-expires. Distinct from the timed quietUntil path so the two can't be
+// confused with each other (an indefinite quiet has no "minutes remaining").
+let quietIndefinite = false;
+let wakeTimer = null;
+let durationPromptExpiresAt = null;
+
+// How long after prompting for a duration a bare typed number is still
+// understood as the answer — kept short so a coincidental, unrelated number
+// typed later in the group chat can't be misread as a quiet-mode request.
+const DURATION_PROMPT_TTL_MS = 2 * 60 * 1000;
+
+function isQuiet() {
+  return quietIndefinite || (quietUntil !== null && Date.now() < quietUntil);
+}
+
+// null means "quiet with no countdown" (indefinite) — distinct from 0
+// ("not quiet at all"). Callers must check isQuiet() first if they need to
+// tell those apart from a plain falsy check.
+function remainingMinutes() {
+  if (quietIndefinite) return null;
+  if (!isQuiet()) return 0;
+  return Math.ceil((quietUntil - Date.now()) / 60000);
+}
+
+// Best-effort only — a disk hiccup here must never break quiet mode itself
+// or crash the app; it just means the crash-recovery message won't fire.
+function _writeMarker(payload) {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(payload));
+  } catch (err) {
+    logger.error('[QUIET_MODE] Failed to write crash-recovery marker:', err);
+  }
+}
+
+function _deleteMarker() {
+  try {
+    if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+  } catch (err) {
+    logger.error('[QUIET_MODE] Failed to remove crash-recovery marker:', err);
+  }
+}
+
+// minutes: caller validates range (1-1440). onWake fires exactly once, only
+// when the period elapses naturally — not on a manual clearQuiet(), since
+// that's the user waking it themselves, not a timeout worth announcing.
+// Replaces whatever quiet state (timed or indefinite) was active before —
+// re-triggering quiet mode always means "start over," never stacks.
+function setQuiet(minutes, onWake) {
+  if (wakeTimer) clearTimeout(wakeTimer);
+  quietIndefinite = false;
+
+  quietUntil = Date.now() + minutes * 60000;
+  _writeMarker({ quietUntil, minutes });
+  logger.info(`[QUIET_MODE] Activated for ${minutes} minute(s)`);
+
+  wakeTimer = setTimeout(() => {
+    quietUntil = null;
+    wakeTimer = null;
+    _deleteMarker();
+    logger.info('[QUIET_MODE] Expired naturally');
+    onWake();
+  }, minutes * 60000);
+}
+
+// Indefinite quiet — automatically activated on a successful ไปพัก (disarm).
+// No timer is armed; only clearQuiet() (เฝ้าบ้าน or กลับบ้าน) ends it.
+function setIndefiniteQuiet() {
+  if (wakeTimer) {
+    clearTimeout(wakeTimer);
+    wakeTimer = null;
+  }
+  quietUntil = null;
+  quietIndefinite = true;
+  _writeMarker({ indefinite: true });
+  logger.info('[QUIET_MODE] Activated indefinitely (ไปพัก)');
+}
+
+function clearQuiet() {
+  if (wakeTimer) {
+    clearTimeout(wakeTimer);
+    wakeTimer = null;
+  }
+  quietUntil = null;
+  quietIndefinite = false;
+  _deleteMarker();
+  logger.info('[QUIET_MODE] Cleared manually');
+}
+
+function armDurationPrompt() {
+  durationPromptExpiresAt = Date.now() + DURATION_PROMPT_TTL_MS;
+}
+
+function isDurationPromptPending() {
+  return durationPromptExpiresAt !== null && Date.now() < durationPromptExpiresAt;
+}
+
+function clearDurationPrompt() {
+  durationPromptExpiresAt = null;
+}
+
+// Read once at boot (app.js). The marker file is only ever deleted through a
+// clean in-process path (manual clearQuiet or the wake timer firing), so its
+// mere presence at boot means the previous process died before either could
+// run — no timestamp comparison or staleness check needed, existence alone
+// is the signal. Consumes (deletes) the marker so a second boot in a row
+// doesn't re-announce the same crash.
+function readCrashMarker() {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return null;
+    const raw = fs.readFileSync(STATE_FILE, 'utf8');
+    fs.unlinkSync(STATE_FILE);
+    return JSON.parse(raw);
+  } catch (err) {
+    logger.error('[QUIET_MODE] Failed to read crash-recovery marker:', err);
+    return null;
+  }
+}
+
+module.exports = {
+  isQuiet,
+  remainingMinutes,
+  setQuiet,
+  setIndefiniteQuiet,
+  clearQuiet,
+  armDurationPrompt,
+  isDurationPromptPending,
+  clearDurationPrompt,
+  readCrashMarker
+};
+```
+
+### 8.17 House Mode (`src/services/houseMode.js`)
+
+Best-effort, in-memory record of the last เฝ้าบ้าน/ไปพัก *this bot itself*
+successfully triggered — explicitly **not** a verified live query against
+Tuya. `interactionRouter.js`'s `_executeArmDisarm` (Section 8.14) already
+treats Tuya's own automation engine as the sole authoritative armed/disarmed
+state; this module exists only so รายงาน (`statusCard.js`'s `buildAllStatusTable`,
+Section 8.12) has something to display. It goes stale/wrong the moment
+someone arms or disarms directly from the Smart Life app instead of through
+this bot — that's why every รายงาน line sourced from it is labeled
+"(ล่าสุดจากบอท)" rather than presented as fact. Lost on restart, same tier
+as `quietMode.js`'s in-memory state.
+
+```javascript
+// Best-effort, in-memory record of the last เฝ้าบ้าน/ไปพัก this bot itself
+// successfully triggered — NOT a verified live query against Tuya. This app
+// deliberately tracks no authoritative armed/disarmed state of its own
+// (interactionRouter.js's _executeArmDisarm: "Tuya's automation engine
+// already is that state"); this is only for the รายงาน summary line, and
+// goes stale/wrong if someone arms or disarms directly from the Smart Life
+// app instead of through this bot. Lost on restart, same tier as
+// quietMode.js's state — a display nicety, not a security-relevant fact.
+let lastMode = null; // 'arm' | 'disarm' | null
+
+function setMode(mode) {
+  lastMode = mode;
+}
+
+function getMode() {
+  return lastMode;
+}
+
+module.exports = { setMode, getMode };
+```
+
+### 8.18 History Card (`src/templates/historyCard.js`)
+
+Reuses `dpProfiles.js`'s alert resolvers (Section 8.11) to interpret each
+Tuya device-log entry's `{code, value}` into the exact same `eventType`
+vocabulary real-time alerts already use — history and live alerts can never
+describe the same state change differently, and there's no separate
+interpretation logic to maintain in parallel. A log entry the resolver
+treats as routine (returns `null` — e.g. healthy battery) is dropped from
+history too, same as it would be from a live alert; this keeps ประวัติ
+focused on actual state changes rather than every raw reading. Timestamps
+use `getBangkokHistoryTimestamp()` (Section 8.3, `DD MMM YY HH:mm:ss`) since
+history can span up to the full 7-day retention window, unlike the
+same-burst `CHAIN_ESCALATION` lines that only need `getBangkokTime()`'s bare
+time-of-day.
+
+```javascript
+// Recent-activity view for a single device — reuses dpProfiles.js's alert
+// resolvers to interpret each Tuya device-log entry's {code, value} into the
+// same eventType vocabulary real-time alerts already use, so history and
+// live alerts never describe the same state change differently. A log entry
+// the resolver treats as routine (returns null — e.g. healthy battery) is
+// dropped from history too, same as it would be from a live alert.
+
+const { DP_PROFILES } = require('../config/dpProfiles');
+const { getBangkokHistoryTimestamp } = require('../utils/dateTime');
+
+const EVENT_DISPLAY = {
+  DOOR_OPENED: { emoji: '🔓', label: 'เปิด' },
+  DOOR_CLOSED: { emoji: '🔒', label: 'ปิด' },
+  RELAY_ON: { emoji: '💡', label: 'เปิด' },
+  RELAY_OFF: { emoji: '⚫', label: 'ปิด' },
+  ALARM_ON: { emoji: '🚨', label: 'ดังขึ้น' },
+  ALARM_OFF: { emoji: '✅', label: 'หยุดดัง' },
+  MOTION_DETECTED: { emoji: '🏃', label: 'ตรวจพบความเคลื่อนไหว' },
+  WATER_LEAK: { emoji: '💧', label: 'ตรวจพบน้ำรั่ว' },
+  BATTERY_LOW: { emoji: '🔋', label: 'แบตต่ำ' }
+};
+
+// logEntries: Tuya's raw /v1.0/devices/{id}/logs `logs` array — each entry
+// is { code, value, event_time, ... }. Filters to entries this device's
+// dpProfile actually interprets as a real state change, newest first.
+function buildHistoryMessage(device, logEntries) {
+  const resolvers = DP_PROFILES[device.dpProfile] || {};
+
+  const lines = (logEntries || [])
+    .map((entry) => {
+      const resolver = resolvers[entry.code];
+      if (!resolver) return null;
+      const resolved = resolver(entry.value);
+      if (!resolved) return null;
+      const display = EVENT_DISPLAY[resolved.eventType];
+      if (!display) return null;
+      return { time: Number(entry.event_time), text: `${display.emoji} ${display.label}` };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.time - a.time);
+
+  const bodyText = lines.length === 0
+    ? 'ไม่มีความเคลื่อนไหวล่าสุดครับ'
+    : lines.map((line) => `${getBangkokHistoryTimestamp(new Date(line.time))}  ${line.text}`).join('\n');
+
+  return {
+    type: 'text',
+    text: `🕘 ประวัติ ${device.name}\n\n${bodyText}`
+  };
+}
+
+module.exports = { buildHistoryMessage };
+```
+
 ---
 
 ## 9. Definition of Done
@@ -2493,6 +3212,20 @@ Phase 1 is complete when all of the following hold:
 * Commanding the Security Remote Control device directly (rather than via a Scene) is confirmed **not** to work — Tuya returns `2008 command or value not support` — and is not attempted anywhere in the codebase; see `TUYA_DEVICE_DP_REGISTRY.md`'s `sos` section for the resolution.
 * Typing the bot's own name (`LINE_BOT_NAME`) opens the greeting shortcut menu (`buildGreeting()`), including เฝ้าบ้าน/ไปพัก buttons only when `armDisarmAvailable()`.
 * A stale postback referencing a device since removed from `deviceRegistry.json` shows a graceful "device not found" message for both status and control actions, not an unhandled error.
+
+### Phase 2 Increment 3 (Device History, Quiet Mode, รายงาน)
+
+* Tapping 🕘 ประวัติ on any queryable device's status card (not just controllable ones) shows real recent state changes with correct `DD MMM YY HH:mm:ss` Bangkok timestamps, newest first — verified live against a real device; a device with no recent activity shows "ไม่มีความเคลื่อนไหวล่าสุดครับ", not an error or blank reply.
+* `getDeviceLogs()`'s query-string parameters are alphabetically sorted before both the real request and its HMAC signature — verified live: an unsorted query produced `1004 sign invalid` before the fix, `40000303 Parameter error!` after sorting but before adding the required `type=7` param, and a real device history after both fixes.
+* `เงียบๆหน่อย` → a preset tap or a typed `/quiet N` → an alert-worthy event during that window produces **no** LINE group push (`[QUIET_MODE] Suppressed` in the log, no `[ALERT_SENT]`), and an automatic "กลับมาแล้วครับ ✅" push fires once the timer elapses naturally.
+* `เงียบๆหน่อย` followed by a bare typed number (not a preset tap) produces the identical suppression behavior — confirms the `isDurationPromptPending()` fallback path in `_handleText`.
+* A bare number typed with **no** preceding เงียบๆหน่อย/duration prompt is ignored as plain text, never misread as a quiet-mode duration.
+* `/quiet N` outside 1–1440 gets a range-rejection reply, never a silently-accepted multi-day quiet period.
+* Confirming ไปพัก automatically enters **indefinite** quiet mode (no auto-expiry) and says so in the reply; confirming เฝ้าบ้าน always clears quiet mode (even if a previous ไปพัก/เงียบๆหน่อย left it active) and says so in the reply — verified live via a routine door/motion event staying silent during ไปพัก and resuming after เฝ้าบ้าน or กลับบ้าน.
+* `ALARM_ON`, `ALARM_OFF`, and `WATER_LEAK` always push through regardless of quiet mode (manual or automatic-from-ไปพัก) — verified for both a standalone critical event and one folded into a `CHAIN_ESCALATION` alongside routine events (`containsCritical` flag).
+* Killing and restarting the process while quiet mode is active (timed or indefinite) produces one explicit "ระบบรีสตาร์ท...กลับมาแจ้งเตือนตามปกติแล้ว" push on the next boot, correctly describing whether the prior quiet was timed or indefinite — not silence, and not a duplicate message on a second consecutive restart (the marker file is consumed on read).
+* `รายงาน` (aliases: `/status all`, `สถานะทั้งหมด`) shows a mode summary line above the device table whenever `houseMode.js` has a last-known arm/disarm or quiet mode is active, each clearly labeled as best-effort ("ล่าสุดจากบอท") rather than a verified live state; the section is omitted entirely (not shown as "unknown") when neither applies.
+* Status queries, device control, and arm/disarm all continue to work normally while quiet mode (timed or indefinite) is active — only the automatic Tuya-triggered alert push is ever suppressed, never a direct reply to a user-initiated tap.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

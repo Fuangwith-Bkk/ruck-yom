@@ -53,4 +53,28 @@ function getBangkokLogTimestamp(date = new Date()) {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
 }
 
-module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp };
+// DD MMM YY HH:mm:ss (e.g. "16 Aug 26 00:52:01") — used for device history
+// lines (historyCard.js), which can span up to a week. Unlike
+// getBangkokTimestamp's DD/MM/YY, a named month reads faster at a glance
+// down a list of rows and can't be misread as MM/DD by a reader used to a
+// different date convention. Computes its own parts (like
+// getBangkokLogTimestamp above) rather than reusing getBangkokDateParts,
+// since that helper's month is numeric, not a name.
+function getBangkokHistoryTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
+    day: '2-digit',
+    month: 'short',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return `${parts.day} ${parts.month} ${parts.year} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp, getBangkokHistoryTimestamp };

@@ -139,4 +139,43 @@ async function triggerScene(ruleId) {
   return request('POST', `/v2.0/cloud/scene/rule/${ruleId}/actions/trigger`, { accessToken });
 }
 
-module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene };
+// Device operation history — 7-day free retention per Tuya's Device Log
+// Service. Defaults to the full 7-day window with size=10 — a wider time
+// window with the same row cap can never return fewer rows than a narrower
+// one (e.g. 24h), only ever the same or more, so this single query already
+// gives "whichever of {last 24h, last 10 rows} has more history" without
+// needing two separate calls: a busy device still gets capped at its most
+// recent 10 rows, while a quiet device reaches back as far as 7 days to
+// fill that same quota instead of coming back empty.
+//
+// The first endpoint this client calls with a query string — Tuya's
+// signature requires query params to appear in the signed URL sorted
+// alphabetically by key (ASCII order), not request/insertion order. Every
+// other call so far (status, commands, scene trigger) has no query string,
+// so this requirement was latent until now; sorting keys here keeps the
+// exact same string used for both the real request and its signature
+// (sign() just signs whatever `path` it's given), so they can never drift
+// apart.
+async function getDeviceLogs(deviceId, { startTime, endTime, size = 10 } = {}) {
+  const accessToken = await getAccessToken();
+  const now = Date.now();
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  const query = {
+    end_time: String(endTime ?? now),
+    size: String(size),
+    start_time: String(startTime ?? now - SEVEN_DAYS_MS),
+    // Required by Tuya (missing it causes "40000303 Parameter error!", not a
+    // default-to-all). type=7 is "data point report" — the only log
+    // category that maps to dpProfiles.js's resolvers (historyCard.js);
+    // online/offline/firmware/etc. (the other type codes) aren't state
+    // changes this app's DP_PROFILES vocabulary can interpret anyway.
+    type: '7'
+  };
+  const sortedQuery = Object.keys(query)
+    .sort()
+    .map((key) => `${key}=${query[key]}`)
+    .join('&');
+  return request('GET', `/v1.0/devices/${deviceId}/logs?${sortedQuery}`, { accessToken });
+}
+
+module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getDeviceLogs };

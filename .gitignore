@@ -24,3 +24,6 @@ yarn-debug.log*
 
 # VM-specific ops script (Oracle Cloud deployment control, not app code)
 ruck-yom.sh
+
+# Quiet-mode crash-recovery marker (runtime state, not app code)
+quiet-state.json
