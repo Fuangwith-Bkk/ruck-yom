@@ -3,6 +3,14 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.2.0] - 2026-08-16
+
+### Added — Phase 2, Increment 4: Remote Sync, Daily Summary, LINE Quota, House Mode Recovery
+- **Physical remote arm/disarm now syncs the bot** — `dpProfiles.js`'s `sos` profile (the Security Remote Control, รีโมท) previously had no entry at all, so every button press surfaced as an `UNKNOWN_EVENT`. Its `arm`/`disarmed` DPs now resolve to `REMOTE_ARMED`/`REMOTE_DISARMED`; `app.js` reacts to those the same way `interactionRouter.js`'s `_executeArmDisarm` does for the LINE-side commands — `houseMode.setMode()` plus `quietMode.setIndefiniteQuiet()`/`clearQuiet()` — so pressing ไปพัก on the physical remote actually suppresses routine alerts too, not just the รายงาน label. Both events are marked critical (`eventCorrelator.js`) so the confirmation push can't suppress itself via the quiet mode it just set. รายงาน's mode label changed from "(ล่าสุดจากบอท)" to "(ล่าสุดที่ทราบ)" since the source is no longer LINE-only.
+- **Daily รายงาน summary** (`DAILY_REPORT_TIME`, `src/services/dailyReport.js`) — optional once-a-day automatic push of the same รายงาน table the manual command sends, in Bangkok time (no DST, so a plain next-occurrence `setTimeout` needs no cron dependency). Deliberately pushed directly rather than through `eventCorrelator.js`, so it always bypasses quiet mode/ไปพัก. Purely in-memory: a restart near the scheduled time just skips that day rather than replaying it. Extracted the shared query/build logic into `src/services/statusReport.js` so the manual command (`interactionRouter.js`'s `_replyAllStatus`) and the daily push can never drift out of sync.
+- **LINE monthly push-quota usage in รายงาน** — `lineMessaging.js` gained `getQuota()` (wrapping the SDK's `getMessageQuota()`/`getMessageQuotaConsumption()`) and `pushMessage()` was generalized to accept a Flex message, not just text. `statusCard.js`'s new `buildQuotaSection` shows usage on both the manual รายงาน and the daily push; best-effort, silently omitted if the quota query fails.
+- **houseMode boot recovery** — a restart previously always started รายงาน's mode line unknown until the next LINE command or remote press. New `TUYA_ALARM_AUTOMATION_ID` env var + `tuyaRestClient.getSceneRule()` (`GET /v2.0/cloud/scene/rule/{rule_id}`) let `app.js` query, at startup, the enable/disable status of the Tuya automation that this deployment's "Arm"/"Disarm" Tap-to-Run scenes toggle, and seed `houseMode` from it. Optional — depends on a specific automation setup existing and being identified via the Tuya API Explorer's Query Linkage Rules endpoint (documented in Section 8.13's `space_id`/`rule_id` guide).
+
 ## [2.1.0] - 2026-08-16
 
 ### Added — Phase 2, Increment 3: Device History, Quiet Mode, รายงาน
