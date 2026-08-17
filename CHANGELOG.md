@@ -3,6 +3,14 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.2.1] - 2026-08-17
+
+### Fixed
+- **Error log messages now include custom subclass fields** — `logger.js`'s `stringify()` previously only logged `Error.stack`/`message`, silently dropping own-enumerable extra fields that custom Error subclasses attach (e.g. `@line/bot-sdk`'s `HTTPFetchError` carries `status`/`statusText`/`body`). A generic `"400 - Bad Request"` in the logs now includes the actual response body that explains why.
+
+### Changed
+- **`.env.example` comments moved above their variable** instead of trailing inline — long annotations no longer force wrapping/horizontal scrolling mid-line.
+
 ## [2.2.0] - 2026-08-16
 
 ### Added — Phase 2, Increment 4: Remote Sync, Daily Summary, LINE Quota, House Mode Recovery

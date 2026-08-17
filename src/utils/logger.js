@@ -65,7 +65,24 @@ async function pruneOldLogs() {
 // decrypted message object passed as a raw arg to its logger callback).
 function stringify(arg) {
   if (typeof arg === 'string') return arg;
-  if (arg instanceof Error) return arg.stack || arg.message;
+  if (arg instanceof Error) {
+    const base = arg.stack || arg.message;
+    // Custom Error subclasses (e.g. @line/bot-sdk's HTTPFetchError) attach
+    // extra own-enumerable fields — status/statusText/body — that carry the
+    // actual reason behind a generic message like "400 - Bad Request".
+    // Object.keys() only picks up own enumerable props, so plain Errors
+    // (message/stack are non-enumerable) are unaffected.
+    const extra = Object.keys(arg).reduce((acc, key) => {
+      acc[key] = arg[key];
+      return acc;
+    }, {});
+    if (Object.keys(extra).length === 0) return base;
+    try {
+      return `${base} ${JSON.stringify(extra)}`;
+    } catch {
+      return base;
+    }
+  }
   try {
     return JSON.stringify(arg);
   } catch {
