@@ -4,7 +4,7 @@ Real-time smart home security engine: consumes Tuya IoT sensor events over Pulsa
 
 See [`RUCKYOM_SPECIFICATION.md`](./RUCKYOM_SPECIFICATION.md) for the full architecture, roadmap, and implementation reference.
 
-**Status:** Phase 2 (Interactive Status Query & Device Control), Increments 1-4 shipped.
+**Status:** Phase 2 (Interactive Status Query & Device Control), Increments 1-5 shipped.
 
 ## Setup
 

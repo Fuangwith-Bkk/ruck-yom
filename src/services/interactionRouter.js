@@ -3,6 +3,8 @@ const { CONTROL_DP } = require('../config/dpProfiles');
 const tuyaRestClient = require('./tuyaRestClient');
 const quietMode = require('./quietMode');
 const houseMode = require('./houseMode');
+const reportMode = require('./reportMode');
+const botIdentity = require('./botIdentity');
 const statusReport = require('./statusReport');
 const {
   buildRootMenu,
@@ -51,6 +53,18 @@ const QUIET_COMMAND_RE = /^\/quiet\s+(\d+)$/;
 const MIN_QUIET_MINUTES = 1;
 const MAX_QUIET_MINUTES = 1440;
 
+// Toggles the scheduled daily รายงาน push (dailyReport.js/reportMode.js) —
+// independent of quiet mode, which the daily report deliberately bypasses.
+const REPORT_OFF_TRIGGERS = new Set(['/report off', 'ปิดรายงาน']);
+const REPORT_ON_TRIGGERS = new Set(['/report on', 'เปิดรายงาน']);
+
+// Hot-swaps which credential set (botIdentity.js) outgoing messages use —
+// prod<->dr only (never dev). Group membership itself is never touched
+// here: the user removes/invites the bots by hand in the LINE app; this
+// just points the running process at the other bot's token/secret/groupId
+// so that manual step is the only one left to do.
+const SWITCH_COMMAND_RE = /^\/switch\s+(prod|dr)$/;
+
 class InteractionRouter {
   constructor(lineService) {
     this.lineService = lineService;
@@ -69,13 +83,22 @@ class InteractionRouter {
   }
 
   async _handleEvent(event) {
+    // Learn the active role's groupId from *any* event sourced from a
+    // group — deliberately not restricted to message/postback, since the
+    // very first event after a manual /switch + invite is typically a
+    // bare `join` (LINE fires this automatically when a bot is added to a
+    // group, with no message attached). Idempotent no-op once known.
+    if (event.source && event.source.type === 'group') {
+      botIdentity.learnGroupId(botIdentity.getActiveRole(), event.source.groupId);
+    }
+
     if (event.type === 'message' && event.message.type === 'text') {
       return this._handleText(event);
     }
     if (event.type === 'postback') {
       return this._handlePostback(event);
     }
-    // Follow/join/other event types: nothing to do yet.
+    // Follow/other event types: nothing further to do.
   }
 
   async _handleText(event) {
@@ -103,6 +126,22 @@ class InteractionRouter {
 
     if (WAKE_TRIGGERS.has(text)) {
       await this._wakeQuiet(event.replyToken);
+      return;
+    }
+
+    if (REPORT_OFF_TRIGGERS.has(text)) {
+      await this._setReportEnabled(event.replyToken, false);
+      return;
+    }
+
+    if (REPORT_ON_TRIGGERS.has(text)) {
+      await this._setReportEnabled(event.replyToken, true);
+      return;
+    }
+
+    const switchMatch = text.match(SWITCH_COMMAND_RE);
+    if (switchMatch) {
+      await this._switchRole(event.replyToken, switchMatch[1]);
       return;
     }
 
@@ -322,6 +361,47 @@ class InteractionRouter {
     // Wording kept neutral (not "I'm awake") since this same reply fires for
     // both ตื่นแล้ว and กลับบ้าน — "I'm home" wouldn't fit an "awake" framing.
     await this.lineService.replyMessage(replyToken, { type: 'text', text: 'กลับมาแจ้งเตือนตามปกติแล้วครับ ✅' });
+  }
+
+  async _setReportEnabled(replyToken, enabled) {
+    reportMode.setEnabled(enabled);
+    const text = enabled
+      ? 'เปิดรายงานประจำวันแล้วครับ'
+      : 'ปิดรายงานประจำวันแล้วครับ พิมพ์ /report on หรือ เปิดรายงาน เพื่อเปิดอีกครั้งนะครับ';
+    await this.lineService.replyMessage(replyToken, { type: 'text', text });
+  }
+
+  // Order matters here: the reply is sent *before* botIdentity.setActiveRole()
+  // runs, so it still goes out via the current (about-to-be-retired) role's
+  // credentials — required, since replyToken is only valid against the
+  // channel that actually delivered this event (lineMessaging.js's
+  // replyMessage always uses the currently active role). Only the outgoing
+  // credential set changes here; LINE group membership itself is left
+  // entirely to the human — this message tells them exactly what to do
+  // next in the LINE app.
+  async _switchRole(replyToken, targetRole) {
+    const currentRole = botIdentity.getActiveRole();
+    if (targetRole === currentRole) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: `ตอนนี้ใช้งาน ${targetRole} อยู่แล้วครับ` });
+      return;
+    }
+
+    if (!botIdentity.isConfigured(targetRole)) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `ยังไม่ได้ตั้งค่า LINE_${targetRole.toUpperCase()}_CHANNEL_ACCESS_TOKEN/SECRET ใน .env ครับ`
+      });
+      return;
+    }
+
+    await this.lineService.replyMessage(replyToken, {
+      type: 'text',
+      text:
+        `สลับไปใช้ bot-${targetRole} แล้วครับ ตอนนี้ไปที่ LINE app: เอา bot-${currentRole} ` +
+        `ออกจากกลุ่มนี้ แล้วเชิญ bot-${targetRole} เข้ากลุ่มแทนได้เลยครับ`
+    });
+
+    botIdentity.setActiveRole(targetRole);
   }
 
   async _replyConfirmPrompt(replyToken, deviceId, cmd) {

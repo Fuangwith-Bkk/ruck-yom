@@ -71,7 +71,7 @@ R7054-V2 Security remote control).
 
 | Code | Type | Values | Handled |
 |---|---|---|---|
-| `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ⚠️ |
+| `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ✅ `BATTERY_LOW` when below `BATTERY_LOW_THRESHOLD` (default 20%) — same `batteryLow()` resolver as every other category. Previously unmapped here, so every periodic reading (confirmed hitting production every few hours) fell through to `UNKNOWN_EVENT` and spammed the raw DP JSON to LINE instead of staying silent while healthy; fixed 2026-08-17. |
 | `sos` | Enum | `sos` | ⚠️ |
 | `arm` | Enum | `arm` (single-value range) | ✅ `REMOTE_ARMED` — syncs houseMode/quietMode same as เฝ้าบ้าน; not commandable |
 | `disarmed` | Enum | `disarmed` (single-value range) | ✅ `REMOTE_DISARMED` — syncs houseMode/quietMode same as ไปพัก; not commandable |
@@ -117,7 +117,7 @@ human body/motion sensor).
 | Code | Type | Values | Handled |
 |---|---|---|---|
 | `pir` | Enum | `pir`, `none` | ✅ `pir` → `MOTION_DETECTED`; `none` is routine, intentionally not emitted |
-| `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ✅ `BATTERY_LOW` when < 20% |
+| `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ✅ `BATTERY_LOW` when below `BATTERY_LOW_THRESHOLD` (default 20%) |
 
 ---
 
@@ -149,7 +149,7 @@ contact switch).
 | Code | Type | Values | Handled |
 |---|---|---|---|
 | `doorcontact_state` | Boolean | `{true, false}` | ✅ `true` → `DOOR_OPENED`; `false` → `DOOR_CLOSED` |
-| `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ✅ `BATTERY_LOW` when < 20% |
+| `battery_percentage` | Integer | unit `%`, range 0–100, step 1 | ✅ `BATTERY_LOW` when below `BATTERY_LOW_THRESHOLD` (default 20%) |
 
 ---
 
@@ -176,7 +176,7 @@ miscategorized generic device.
 | Code | Type | Values | Handled |
 |---|---|---|---|
 | `switch` | Boolean | `{true, false}` | ✅ `DOOR_OPENED` (`true`) / `DOOR_CLOSED` (`false`) — `sensorNormalizer.js` treats it as door-contact state, same polarity as `doorcontact_state`. Distinct from `switch_1` used by `tdq`, which is relay/light control, not a door. |
-| `battery` | Integer | range 0–500, step 1, no unit | ✅ `BATTERY_LOW` when < 20% — `sensorNormalizer.js` treats it as an alias for `battery_percentage`. Range shown as 0–500 by Tuya's generic category docs, but the one real sample seen (`value: 100`) is consistent with a plain 0–100% reading, which is how it's currently interpreted. |
+| `battery` | Integer | range 0–500, step 1, no unit | ✅ `BATTERY_LOW` when below `BATTERY_LOW_THRESHOLD` (default 20%) — `sensorNormalizer.js` treats it as an alias for `battery_percentage`. Range shown as 0–500 by Tuya's generic category docs, but the one real sample seen (`value: 100`) is consistent with a plain 0–100% reading, which is how it's currently interpreted. |
 
 ---
 
@@ -202,3 +202,4 @@ miscategorized generic device.
 | 2026-08-14 | `sgbj`/`alarm_switch` marked ✅ handled for both `true` and `false` (`ALARM_ON`/`ALARM_OFF` in `sensorNormalizer.js`) — Boolean `{true, false}` type was already documented from the original `devices-format.md`/Tuya IoT Platform Device Debugging screen, confirming `false` is a real "off" state, not inferred. |
 | 2026-08-15 | Every category code confirmed directly against its real registered device's Product Category on the Tuya IoT Platform (`mcs`, `qt`, `tdq`, `sgbj`, `pir`, `sos`) — Remarks updated with the exact Product Names. `sensorNormalizer.js` rewritten to dispatch per-device via `src/config/dpProfiles.js`, keyed by these exact category codes, instead of matching DP codes globally — closes a real ambiguity risk (e.g. `tdq`'s `switch_1` and a hypothetical future category reusing the same code name for something else could previously have been cross-interpreted). |
 | 2026-08-15 | `sos`'s `arm`/`disarmed`/`home` DPs confirmed real (Enum, single-value range) after switching the product to DP Instruction mode — but confirmed **not commandable** from the cloud (`2008 command or value not support`), since this is a battery-powered Zigbee end device that can't receive downlink commands. เฝ้าบ้าน/ไปพัก resolved instead by triggering pre-built Tap-to-Run Scenes (`triggerScene()` in `tuyaRestClient.js`) — confirmed working live via LINE. |
+| 2026-08-17 | `sos`'s `battery_percentage` marked ✅ handled — confirmed via production logs that รีโมท reports this DP every few hours, but with no entry in `dpProfiles.js`'s `sos` profile it fell through to `UNKNOWN_EVENT` on every reading, spamming the raw DP JSON to LINE. Now mapped through the shared `batteryLow()` resolver, same as every other category. The `< 20%` threshold used by `batteryLow()` across all categories is no longer hardcoded — tunable via the new `BATTERY_LOW_THRESHOLD` env var (default 20). |

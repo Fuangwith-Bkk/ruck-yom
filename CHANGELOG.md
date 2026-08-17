@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.3.0] - 2026-08-17
+
+### Fixed
+- **รีโมท (Security Remote Control) battery alerts** — its `sos` dpProfile never mapped `battery_percentage`, so every periodic battery reading (confirmed hitting production every few hours, 87% constant) fell through to `UNKNOWN_EVENT` and spammed the raw DP JSON to the group instead of a normal battery message — one occurrence even triggered a LINE API `400 Bad Request`. Now resolves through the same `batteryLow()` resolver as every other profile, so it's silent while healthy and renders the normal `BATTERY_LOW` template once actually low.
+
+### Added
+- **`BATTERY_LOW_THRESHOLD`** env var — the battery % cutoff (`dpProfiles.js`'s `batteryLow()`) was previously hardcoded at `20`; now tunable per deployment without a code change.
+- **Daily รายงาน on/off toggle** — `/report off`/`ปิดรายงาน` and `/report on`/`เปิดรายงาน` (new `src/services/reportMode.js`), persisted the same crash-recovery-marker way as `quietMode.js`'s state. `dailyReport.js` checks it right before each scheduled send, so toggling takes effect on the very next run with no restart needed.
+- **`/switch dr` / `/switch prod`** — hot-swaps which LINE Official Account credential set the running process uses (new `src/services/botIdentity.js`), with no restart. LINE gives a bot no API to join a group (only `leaveGroup` to remove itself) and doesn't allow two bots to be members of the same group chat at once, so this only automates the backend credential swap — the human still does the actual leave/invite in the LINE app afterward. Each role's `groupId` is learned automatically from its first event in the group rather than needing to be copied into `.env` by hand.
+
+### Changed
+- **Breaking: LINE credentials are now role-prefixed.** `LINE_CHANNEL_ACCESS_TOKEN`/`LINE_CHANNEL_SECRET`/`LINE_GROUP_ID` are replaced by `LINE_DEV_*`/`LINE_PROD_*`/`LINE_DR_*` plus `LINE_ACTIVE_ROLE` (the role used at boot) and `LINE_ROLE_STATE_FILE` (persists the active role + learned groupIds across restarts — overrides `LINE_ACTIVE_ROLE` after the first `/switch`). Existing deployments must migrate `.env` before upgrading; `environment.js`'s `validateEnv()` now only requires whichever role is currently active to have a token/secret configured, not a single flat pair.
+
 ## [2.2.1] - 2026-08-17
 
 ### Fixed

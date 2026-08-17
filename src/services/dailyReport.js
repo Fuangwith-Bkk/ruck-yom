@@ -1,5 +1,6 @@
 const logger = require('../utils/logger');
 const statusReport = require('./statusReport');
+const reportMode = require('./reportMode');
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -57,6 +58,14 @@ function start(lineService) {
 
     setTimeout(async () => {
       try {
+        // Checked here, not at start() — so /report off (reportMode.js)
+        // takes effect on the very next scheduled run without needing a
+        // restart, and toggling it back on doesn't require re-arming
+        // anything either.
+        if (!reportMode.isEnabled()) {
+          logger.info('[DAILY_REPORT] Skipped — disabled via /report off');
+          return;
+        }
         const message = await statusReport.buildReport(lineService);
         await lineService.pushMessage(message);
         logger.info('[DAILY_REPORT] Sent daily summary');

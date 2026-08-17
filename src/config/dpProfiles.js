@@ -25,8 +25,13 @@
 
 const isTrue = (value) => value === true || value === 'true';
 
+// Re-read on every call (not cached at module load) so BATTERY_LOW_THRESHOLD
+// can be tuned in .env without a code change — same pattern as
+// eventCorrelator.js's windowMs(). Falls back to the original hardcoded 20%.
+const batteryLowThreshold = () => Number(process.env.BATTERY_LOW_THRESHOLD) || 20;
+
 function batteryLow(value) {
-  if (typeof value !== 'number' || value >= 20) return null;
+  if (typeof value !== 'number' || value >= batteryLowThreshold()) return null;
   return { eventType: 'BATTERY_LOW', extra: { batteryLevel: value } };
 }
 
@@ -105,9 +110,16 @@ const DP_PROFILES = {
   // ไปพัก commands do (app.js). `home` and `sos` fall through to
   // UNKNOWN_EVENT for now; this device can't receive cloud commands either
   // way (Tuya error 2008), so nothing here ever needs a CONTROL_DP entry.
+  // `battery_percentage` is also periodically reported by this device (every
+  // few hours) — without an entry here it fell through to UNKNOWN_EVENT too,
+  // spamming the raw DP JSON to LINE on every routine reading (confirmed in
+  // production logs, 2026-08-17). Mapped through the same batteryLow()
+  // resolver as every other profile so it's suppressed while healthy and
+  // renders the normal BATTERY_LOW template once actually low.
   sos: {
     arm: remoteArmed,
-    disarmed: remoteDisarmed
+    disarmed: remoteDisarmed,
+    battery_percentage: batteryLow
   }
 };
 

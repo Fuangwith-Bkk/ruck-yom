@@ -167,6 +167,12 @@ yarn-debug.log*
 # Quiet-mode crash-recovery marker (runtime state, not app code)
 quiet-state.json
 
+# Daily รายงาน disabled marker (runtime state, not app code)
+report-state.json
+
+# Active bot role (dev/prod/dr) + learned groupIds (runtime state, not app code)
+line-role-state.json
+
 ```
 
 ### Environment Variables Template (`.env.example`)
@@ -192,16 +198,34 @@ TUYA_MQ_URL=wss://mqe-sg.iotbing.com:8285/
 TUYA_MQ_ENV=PROD
 
 # LINE Messaging API Credentials
-LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token
-LINE_CHANNEL_SECRET=your_line_channel_secret   # Phase 2: verifies incoming webhook signatures. Required — get the real value from the LINE Developers Console, not this placeholder.
-LINE_GROUP_ID=your_target_line_group_id
+# [Phase 2, Increment 5] Role-prefixed rather than flat vars: /switch dr|prod
+# (Section 8.14/8.22) hot-swaps which credential set outgoing messages use,
+# with no restart — required because LINE doesn't allow two bots to be
+# members of the same group chat at once, so exactly one of prod/dr is ever
+# really in the group; dev is the local/testing identity, never
+# chat-switchable.
+LINE_ACTIVE_ROLE=dev                           # Which set is active at boot — dev|prod|dr. Only the *initial* value: once /switch has been used, LINE_ROLE_STATE_FILE below wins on every later restart.
+LINE_DEV_CHANNEL_ACCESS_TOKEN=your_dev_line_channel_access_token
+LINE_DEV_CHANNEL_SECRET=your_dev_line_channel_secret
+LINE_DEV_GROUP_ID=your_dev_line_group_or_user_id
+LINE_PROD_CHANNEL_ACCESS_TOKEN=your_prod_line_channel_access_token
+LINE_PROD_CHANNEL_SECRET=your_prod_line_channel_secret
+LINE_PROD_GROUP_ID=                            # Optional fallback — normally learned automatically the first time this role's bot is seen in the group.
+LINE_DR_CHANNEL_ACCESS_TOKEN=your_dr_line_channel_access_token
+LINE_DR_CHANNEL_SECRET=your_dr_line_channel_secret
+LINE_DR_GROUP_ID=
+LINE_ROLE_STATE_FILE=./line-role-state.json    # Persists the active role + each role's learned groupId across restarts (Section 8.22). Optional, defaults to ./line-role-state.json.
 LINE_BOT_NAME=รักยม                            # Used as {{botName}} in alert templates. Optional, defaults to รักยม.
 
 # Event Consolidation
 EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidation window (ms). Optional, defaults to 15000.
 
+# Battery Alerts
+BATTERY_LOW_THRESHOLD=20                       # [Phase 2, Increment 5] battery_percentage/battery DP value (%) below which a device triggers BATTERY_LOW (Section 8.11's batteryLow()). Optional, defaults to 20.
+
 # Daily Summary
 DAILY_REPORT_TIME=08:00                        # HH:mm, in TIMEZONE. Pushes รายงาน (device status + houseMode/quietMode + LINE quota) once a day, bypassing quiet mode (Section 8.20). Optional — disabled if unset.
+REPORT_STATE_FILE=./report-state.json          # [Phase 2, Increment 5] Existence-only marker persisting whether the daily รายงาน push is currently disabled via /report off (ปิดรายงาน) — Section 8.21. Optional, defaults to ./report-state.json.
 
 # Quiet Mode (เงียบๆหน่อย)
 QUIET_STATE_FILE=./quiet-state.json            # Crash-recovery marker file (existence-only signal, not real state persistence). Optional, defaults to ./quiet-state.json.
@@ -257,7 +281,9 @@ ruck-yom/
 │   │   ├── quietMode.js            # [Phase 2, Increment 3] In-memory quiet-mode state (timed or indefinite) + crash-recovery marker file; see Section 8.16
 │   │   ├── houseMode.js            # [Phase 2, Increment 3] Best-effort last-known arm/disarm, for รายงาน display only — seeded via LINE, the physical remote, or a Tuya automation query at boot; see Section 8.17
 │   │   ├── statusReport.js         # [Phase 2, Increment 4] Shared รายงาน builder (device status + houseMode/quietMode + LINE quota) — used by both the manual command and the daily push; see Section 8.19
-│   │   └── dailyReport.js          # [Phase 2, Increment 4] Optional once-daily automatic รายงาน push (DAILY_REPORT_TIME); see Section 8.20
+│   │   ├── dailyReport.js          # [Phase 2, Increment 4] Optional once-daily automatic รายงาน push (DAILY_REPORT_TIME), gated by reportMode.js; see Section 8.20
+│   │   ├── reportMode.js           # [Phase 2, Increment 5] Persisted on/off toggle for the daily รายงาน push (/report off|on, ปิดรายงาน/เปิดรายงาน); see Section 8.21
+│   │   └── botIdentity.js          # [Phase 2, Increment 5] Role-based LINE credential set (dev/prod/dr) + active-role/learned-groupId persistence, driving /switch dr|prod; see Section 8.22
 │   ├── templates/
 │   │   ├── securityAlerts.json     # Localized Thai alert message templates (Phase 1)
 │   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm/quiet), dynamic, not static JSON
@@ -295,15 +321,16 @@ authoritative source is `dpProfiles.js` itself, cross-referenced with
 | `dpProfile` | Tuya Category | DP Code (`code`) | Value | `eventType` |
 | --- | --- | --- | --- | --- |
 | `mcs` | Contact Sensor | `doorcontact_state` | `true` / `false` | `DOOR_OPENED` / `DOOR_CLOSED` |
-| `mcs` | Contact Sensor | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< 20%) |
+| `mcs` | Contact Sensor | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) |
 | `qt` | Others (door/window magnetic sensor) | `switch` | `true` / `false` | `DOOR_OPENED` / `DOOR_CLOSED` |
-| `qt` | Others (door/window magnetic sensor) | `battery` | `number` | `BATTERY_LOW` (< 20%) |
+| `qt` | Others (door/window magnetic sensor) | `battery` | `number` | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) |
 | `pir` | Motion Detector | `pir` | `"pir"` / `"none"` | `MOTION_DETECTED` / *(silent)* |
-| `pir` | Motion Detector | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< 20%) |
+| `pir` | Motion Detector | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) |
 | `tdq` | Breaker | `switch_1` | `true` / `false` | `RELAY_ON` / `RELAY_OFF` |
 | `sgbj` | Siren | `alarm_switch` | `true` / `false` | `ALARM_ON` / `ALARM_OFF` |
 | `watersensor`* | Water Leak Sensor | `watersensor_state` | `"alarm"` / `"normal"` | `WATER_LEAK` / *(silent)* |
 | `sos` | Emergency Button (Security Remote Control) | `arm` / `disarmed` | `"arm"` / `"disarmed"` | `REMOTE_ARMED` / `REMOTE_DISARMED` |
+| `sos` | Emergency Button (Security Remote Control) | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) — Increment 5; previously unmapped, fell through to `UNKNOWN_EVENT` |
 | `sos` | Emergency Button (Security Remote Control) | `home` / `sos` | — | *(still `UNKNOWN_EVENT`, see `TUYA_DEVICE_DP_REGISTRY.md`)* |
 
 \* `watersensor` is a placeholder profile key — no device is registered
@@ -382,23 +409,39 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 
 ### 8.2 Environment Schema Validator (`src/config/environment.js`)
 
+**Increment 5 addition.** LINE credentials moved from flat vars to
+role-prefixed ones (`botIdentity.js`, Section 8.22) so `/switch dr|prod` can
+hot-swap them with no restart. `REQUIRED_ENV` no longer lists any flat
+`LINE_*` var — it now checks only that `botIdentity.getActiveRole()`'s
+token/secret pair exists, since the other role(s) aren't needed until
+actually switched to.
+
 ```javascript
+const botIdentity = require('../services/botIdentity');
+
 const REQUIRED_ENV = [
   'TUYA_ACCESS_ID',
   'TUYA_ACCESS_SECRET',
   'TUYA_MQ_URL',
-  'LINE_CHANNEL_ACCESS_TOKEN',
-  'LINE_GROUP_ID',
   // Phase 2 (interactive status query & control): TUYA_BASE_URL is used by
-  // tuyaRestClient.js; LINE_CHANNEL_SECRET verifies incoming webhook
-  // signatures; PORT is the webhook Express server's listen port.
+  // tuyaRestClient.js; PORT is the webhook Express server's listen port.
   'TUYA_BASE_URL',
-  'LINE_CHANNEL_SECRET',
   'PORT'
 ];
 
 function validateEnv() {
   const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
+
+  // LINE credentials are role-prefixed (botIdentity.js) rather than flat
+  // vars, since /switch dr|prod can point this process at a different
+  // credential set without a restart — only the *currently* active role's
+  // token+secret need to exist at boot; the other role(s) are only
+  // required once actually switched to.
+  const activeRole = botIdentity.getActiveRole();
+  if (!botIdentity.isConfigured(activeRole)) {
+    missing.push(`LINE_${activeRole.toUpperCase()}_CHANNEL_ACCESS_TOKEN/SECRET`);
+  }
+
   if (missing.length > 0) {
     console.error(`[FATAL] Missing required environment variables: ${missing.join(', ')}`);
     process.exit(1);
@@ -650,15 +693,45 @@ module.exports = TemplateEngine;
 
 ### 8.7 LINE Messaging Service (`src/services/lineMessaging.js`)
 
+**Increment 5 addition.** Credentials are no longer cached at construction —
+`_clientFor(role)` re-resolves the active role's token via `botIdentity.js`
+on every call and only rebuilds the SDK client when the token actually
+changed, since `/switch` (Section 8.14/8.22) can flip the active role at any
+moment and two separate instances of this class exist (`app.js`'s and
+`webhook/server.js`'s), so there's no single place to push an invalidation
+into both. `pushMessage`'s `groupId` is likewise resolved per call, and
+throws a clear error if that role hasn't had its groupId learned yet.
+`replyMessage` always uses the currently active role — correct because
+`server.js` (Section 8.15) only ever forwards a webhook event whose
+signature matched that same active role's secret, so "active role" and
+"role that delivered this replyToken" are the same thing by construction.
+
 ```javascript
 const { messagingApi } = require('@line/bot-sdk');
+const botIdentity = require('./botIdentity');
 
 class LineMessagingService {
   constructor() {
-    this.client = new messagingApi.MessagingApiClient({
-      channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN
-    });
-    this.groupId = process.env.LINE_GROUP_ID;
+    this._client = null;
+    this._clientToken = null;
+  }
+
+  // Rebuilds the underlying SDK client only when the token actually
+  // changed since the last call, rather than caching one role at
+  // construction time — /switch (botIdentity.js) can change the active
+  // role at any moment, and two separate instances of this class exist
+  // (app.js's and webhook/server.js's), so there's no single place to push
+  // an invalidation into both. Cheap to re-check on every call instead.
+  _clientFor(role) {
+    const { accessToken } = botIdentity.getCredentials(role);
+    if (!accessToken) {
+      throw new Error(`LINE_${role.toUpperCase()}_CHANNEL_ACCESS_TOKEN is missing from environment.`);
+    }
+    if (this._clientToken !== accessToken) {
+      this._client = new messagingApi.MessagingApiClient({ channelAccessToken: accessToken });
+      this._clientToken = accessToken;
+    }
+    return this._client;
   }
 
   // `content` is either a plain string (wrapped as a text message, the
@@ -667,15 +740,19 @@ class LineMessagingService {
   // table for the daily summary) — same accepts-either pattern as
   // replyMessage below.
   async pushMessage(content) {
-    if (!this.groupId) {
-      throw new Error('LINE_GROUP_ID is missing from environment.');
+    const role = botIdentity.getActiveRole();
+    const { groupId } = botIdentity.getCredentials(role);
+    if (!groupId) {
+      throw new Error(
+        `No groupId known yet for role "${role}" — invite bot-${role} into the group first (its groupId is learned automatically from its first event there).`
+      );
     }
 
     const messages =
       typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [content];
 
-    await this.client.pushMessage({
-      to: this.groupId,
+    await this._clientFor(role).pushMessage({
+      to: groupId,
       messages
     });
   }
@@ -686,9 +763,10 @@ class LineMessagingService {
   // own API, unrelated to Tuya. Callers decide how to handle a failure
   // (statusReport.js treats it as best-effort, same as houseMode/quietMode).
   async getQuota() {
+    const client = this._clientFor(botIdentity.getActiveRole());
     const [quota, consumption] = await Promise.all([
-      this.client.getMessageQuota(),
-      this.client.getMessageQuotaConsumption()
+      client.getMessageQuota(),
+      client.getMessageQuotaConsumption()
     ]);
     return { quota, consumption };
   }
@@ -698,8 +776,18 @@ class LineMessagingService {
   // doesn't count against the push-message quota and works in whichever
   // chat (group or 1:1) the triggering event came from. replyToken expires
   // ~1 minute after the event, so this must be called promptly.
+  //
+  // Always uses the currently active role's credentials — correct because
+  // server.js only ever verifies (and therefore only ever forwards) a
+  // webhook event whose signature matches that same active role's channel
+  // secret at the moment it arrives, so "active role" and "role that
+  // delivered this replyToken" are always the same thing by construction.
+  // /switch relies on this too: interactionRouter.js sends its confirmation
+  // reply *before* calling botIdentity.setActiveRole(), so it still goes
+  // out via the outgoing role, exactly matching the replyToken it's tied to.
   async replyMessage(replyToken, messages) {
-    await this.client.replyMessage({
+    const client = this._clientFor(botIdentity.getActiveRole());
+    await client.replyMessage({
       replyToken,
       messages: Array.isArray(messages) ? messages : [messages]
     });
@@ -1254,6 +1342,15 @@ alert interpretation (Phase 1 `sensorNormalizer.js`, Section 8.5).
 `deviceCategories.js` is the coarser, user-facing grouping that drives the
 Phase 2 tap-menu — it has no effect on alerting.
 
+**Increment 5 addition.** `batteryLow()`'s threshold is no longer hardcoded
+`20` — `batteryLowThreshold()` re-reads `BATTERY_LOW_THRESHOLD` on every call
+(same pattern as `eventCorrelator.js`'s `windowMs()`), falling back to 20 if
+unset. The `sos` profile also gained a `battery_percentage: batteryLow`
+entry: รีโมท reports this DP every few hours, and with no entry here it fell
+through to `UNKNOWN_EVENT` on every reading, spamming the raw DP JSON to
+LINE instead of staying silent while healthy — confirmed live in production
+logs, fixed 2026-08-17.
+
 ```javascript
 // Declarative DP interpretation table, keyed by Tuya Product Category code
 // (the same codes used as section headers in TUYA_DEVICE_DP_REGISTRY.md —
@@ -1282,8 +1379,13 @@ Phase 2 tap-menu — it has no effect on alerting.
 
 const isTrue = (value) => value === true || value === 'true';
 
+// Re-read on every call (not cached at module load) so BATTERY_LOW_THRESHOLD
+// can be tuned in .env without a code change — same pattern as
+// eventCorrelator.js's windowMs(). Falls back to the original hardcoded 20%.
+const batteryLowThreshold = () => Number(process.env.BATTERY_LOW_THRESHOLD) || 20;
+
 function batteryLow(value) {
-  if (typeof value !== 'number' || value >= 20) return null;
+  if (typeof value !== 'number' || value >= batteryLowThreshold()) return null;
   return { eventType: 'BATTERY_LOW', extra: { batteryLevel: value } };
 }
 
@@ -1353,17 +1455,25 @@ const DP_PROFILES = {
   watersensor: {
     watersensor_state: waterLeak
   },
-  // Security Remote Control (Emergency Button / รีโมท) — its arm/disarmed/
-  // home/sos Enum DPs are confirmed real (TUYA_DEVICE_DP_REGISTRY.md) but
-  // not externally commandable (battery-powered Zigbee end device — see
-  // Section 8.13 on triggerScene). Only `arm`/`disarmed` are handled: these
-  // sync houseMode/quietMode the same way the LINE-side เฝ้าบ้าน/ไปพัก
-  // commands do (app.js, on REMOTE_ARMED/REMOTE_DISARMED) — the hardware
-  // counterpart to interactionRouter.js's _executeArmDisarm. `home`/`sos`
-  // still fall through to UNKNOWN_EVENT.
+  // Security Remote Control (Emergency Button / รีโมท) — per
+  // TUYA_DEVICE_DP_REGISTRY.md, its 4 physical buttons (home, arm, disarm,
+  // sos) each transmit as their own single-value-range Enum DP, so the DP
+  // *code* itself (not the value, which is always identical to the code) is
+  // what identifies the button pressed. Only `arm`/`disarmed` are handled —
+  // these drive houseMode/quietMode the same way the LINE-side เฝ้าบ้าน/
+  // ไปพัก commands do (app.js). `home` and `sos` fall through to
+  // UNKNOWN_EVENT for now; this device can't receive cloud commands either
+  // way (Tuya error 2008), so nothing here ever needs a CONTROL_DP entry.
+  // `battery_percentage` is also periodically reported by this device (every
+  // few hours) — without an entry here it fell through to UNKNOWN_EVENT too,
+  // spamming the raw DP JSON to LINE on every routine reading (confirmed in
+  // production logs, 2026-08-17). Mapped through the same batteryLow()
+  // resolver as every other profile so it's suppressed while healthy and
+  // renders the normal BATTERY_LOW template once actually low.
   sos: {
     arm: remoteArmed,
-    disarmed: remoteDisarmed
+    disarmed: remoteDisarmed,
+    battery_percentage: batteryLow
   }
 };
 
@@ -1380,7 +1490,6 @@ const CONTROL_DP = {
 };
 
 module.exports = { DP_PROFILES, CONTROL_DP };
-
 ```
 
 ```javascript
@@ -2535,12 +2644,30 @@ tapping a preset, typing `/quiet N`, or typing a bare number while
 (`a=history`) is a straightforward query action, same not-found/try-catch
 pattern as `_replyDeviceStatus`.
 
+**Increment 5 additions.** `_handleEvent` now learns each active role's
+`groupId` (`botIdentity.js`, Section 8.22) from any event sourced from a
+group, not just message/postback — deliberately including the bare `join`
+event LINE fires when a bot is added to a group, so a freshly manually
+invited bot needs zero `.env` pre-configuration. Two new command families:
+`/report off`/`ปิดรายงาน` and `/report on`/`เปิดรายงาน` (`_setReportEnabled`,
+Section 8.21) toggle the daily รายงาน push; `/switch dr`/`/switch prod`
+(`_switchRole`) hot-swaps which credential set outgoing messages use. Order
+matters in `_switchRole`: the confirmation reply is sent *before*
+`botIdentity.setActiveRole()` runs, since `replyToken` is only valid against
+the channel that actually delivered the event — reversing that order would
+mean confirming the switch via credentials that no longer match the token
+LINE expects for that `replyToken`. `/switch` never touches LINE group
+membership itself; the reply tells the human exactly what to do by hand in
+the LINE app next.
+
 ```javascript
 const deviceRegistry = require('../config/deviceRegistry');
 const { CONTROL_DP } = require('../config/dpProfiles');
 const tuyaRestClient = require('./tuyaRestClient');
 const quietMode = require('./quietMode');
 const houseMode = require('./houseMode');
+const reportMode = require('./reportMode');
+const botIdentity = require('./botIdentity');
 const statusReport = require('./statusReport');
 const {
   buildRootMenu,
@@ -2589,6 +2716,18 @@ const QUIET_COMMAND_RE = /^\/quiet\s+(\d+)$/;
 const MIN_QUIET_MINUTES = 1;
 const MAX_QUIET_MINUTES = 1440;
 
+// Toggles the scheduled daily รายงาน push (dailyReport.js/reportMode.js) —
+// independent of quiet mode, which the daily report deliberately bypasses.
+const REPORT_OFF_TRIGGERS = new Set(['/report off', 'ปิดรายงาน']);
+const REPORT_ON_TRIGGERS = new Set(['/report on', 'เปิดรายงาน']);
+
+// Hot-swaps which credential set (botIdentity.js) outgoing messages use —
+// prod<->dr only (never dev). Group membership itself is never touched
+// here: the user removes/invites the bots by hand in the LINE app; this
+// just points the running process at the other bot's token/secret/groupId
+// so that manual step is the only one left to do.
+const SWITCH_COMMAND_RE = /^\/switch\s+(prod|dr)$/;
+
 class InteractionRouter {
   constructor(lineService) {
     this.lineService = lineService;
@@ -2607,13 +2746,22 @@ class InteractionRouter {
   }
 
   async _handleEvent(event) {
+    // Learn the active role's groupId from *any* event sourced from a
+    // group — deliberately not restricted to message/postback, since the
+    // very first event after a manual /switch + invite is typically a
+    // bare `join` (LINE fires this automatically when a bot is added to a
+    // group, with no message attached). Idempotent no-op once known.
+    if (event.source && event.source.type === 'group') {
+      botIdentity.learnGroupId(botIdentity.getActiveRole(), event.source.groupId);
+    }
+
     if (event.type === 'message' && event.message.type === 'text') {
       return this._handleText(event);
     }
     if (event.type === 'postback') {
       return this._handlePostback(event);
     }
-    // Follow/join/other event types: nothing to do yet.
+    // Follow/other event types: nothing further to do.
   }
 
   async _handleText(event) {
@@ -2641,6 +2789,22 @@ class InteractionRouter {
 
     if (WAKE_TRIGGERS.has(text)) {
       await this._wakeQuiet(event.replyToken);
+      return;
+    }
+
+    if (REPORT_OFF_TRIGGERS.has(text)) {
+      await this._setReportEnabled(event.replyToken, false);
+      return;
+    }
+
+    if (REPORT_ON_TRIGGERS.has(text)) {
+      await this._setReportEnabled(event.replyToken, true);
+      return;
+    }
+
+    const switchMatch = text.match(SWITCH_COMMAND_RE);
+    if (switchMatch) {
+      await this._switchRole(event.replyToken, switchMatch[1]);
       return;
     }
 
@@ -2862,6 +3026,47 @@ class InteractionRouter {
     await this.lineService.replyMessage(replyToken, { type: 'text', text: 'กลับมาแจ้งเตือนตามปกติแล้วครับ ✅' });
   }
 
+  async _setReportEnabled(replyToken, enabled) {
+    reportMode.setEnabled(enabled);
+    const text = enabled
+      ? 'เปิดรายงานประจำวันแล้วครับ'
+      : 'ปิดรายงานประจำวันแล้วครับ พิมพ์ /report on หรือ เปิดรายงาน เพื่อเปิดอีกครั้งนะครับ';
+    await this.lineService.replyMessage(replyToken, { type: 'text', text });
+  }
+
+  // Order matters here: the reply is sent *before* botIdentity.setActiveRole()
+  // runs, so it still goes out via the current (about-to-be-retired) role's
+  // credentials — required, since replyToken is only valid against the
+  // channel that actually delivered this event (lineMessaging.js's
+  // replyMessage always uses the currently active role). Only the outgoing
+  // credential set changes here; LINE group membership itself is left
+  // entirely to the human — this message tells them exactly what to do
+  // next in the LINE app.
+  async _switchRole(replyToken, targetRole) {
+    const currentRole = botIdentity.getActiveRole();
+    if (targetRole === currentRole) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: `ตอนนี้ใช้งาน ${targetRole} อยู่แล้วครับ` });
+      return;
+    }
+
+    if (!botIdentity.isConfigured(targetRole)) {
+      await this.lineService.replyMessage(replyToken, {
+        type: 'text',
+        text: `ยังไม่ได้ตั้งค่า LINE_${targetRole.toUpperCase()}_CHANNEL_ACCESS_TOKEN/SECRET ใน .env ครับ`
+      });
+      return;
+    }
+
+    await this.lineService.replyMessage(replyToken, {
+      type: 'text',
+      text:
+        `สลับไปใช้ bot-${targetRole} แล้วครับ ตอนนี้ไปที่ LINE app: เอา bot-${currentRole} ` +
+        `ออกจากกลุ่มนี้ แล้วเชิญ bot-${targetRole} เข้ากลุ่มแทนได้เลยครับ`
+    });
+
+    botIdentity.setActiveRole(targetRole);
+  }
+
   async _replyConfirmPrompt(replyToken, deviceId, cmd) {
     const device = deviceRegistry[deviceId];
     if (!device) {
@@ -2912,9 +3117,9 @@ class InteractionRouter {
 
   // Queries every queryable device's status in parallel (plus houseMode/
   // quietMode/LINE-quota context) via statusReport.js, shared with the
-  // automatic daily summary (dailyReport.js, Section 8.20) — a partial
-  // device-query failure still shows every device that did succeed, rather
-  // than failing the whole table over one bad query.
+  // automatic daily summary (dailyReport.js) — a partial device-query
+  // failure still shows every device that did succeed, rather than failing
+  // the whole table over one bad query.
   async _replyAllStatus(replyToken) {
     if (queryableDevices().length === 0) {
       await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังไม่มีอุปกรณ์ที่เช็คสถานะได้ครับ' });
@@ -2984,11 +3189,22 @@ module.exports = InteractionRouter;
 
 ### 8.15 Webhook Server (`src/webhook/server.js`)
 
+**Increment 5 addition.** Signature verification no longer builds
+`middleware()` once at server-startup against a static `LINE_CHANNEL_SECRET`
+— `verifySignature` resolves `botIdentity.getActiveRole()`'s channel secret
+fresh on every request and calls `middleware({ channelSecret })` inline, so
+`/switch dr|prod` (Section 8.14) takes effect immediately with no restart.
+This is safe without any multi-secret fallback because LINE never allows two
+bots to be members of the same group chat at once — whichever role is
+currently active is, by construction, the only one whose signature could
+ever legitimately validate.
+
 ```javascript
 const express = require('express');
 const { middleware, SignatureValidationFailed } = require('@line/bot-sdk');
 const LineMessagingService = require('../services/lineMessaging');
 const InteractionRouter = require('../services/interactionRouter');
+const botIdentity = require('../services/botIdentity');
 const logger = require('../utils/logger');
 
 // Phase 2: interactive status query & device control, driven entirely by
@@ -3000,12 +3216,26 @@ function createWebhookServer() {
   const lineService = new LineMessagingService();
   const router = new InteractionRouter(lineService);
 
-  // Verifies the x-line-signature header against LINE_CHANNEL_SECRET and
-  // parses the JSON body — a request that fails signature verification
-  // never reaches the route handler at all.
-  const lineMiddleware = middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET });
+  // Verifies the x-line-signature header against the *currently active*
+  // role's channel secret (botIdentity.js) and parses the JSON body — a
+  // request that fails signature verification never reaches the route
+  // handler at all. Resolved fresh per request (not built once at server
+  // startup) so /switch dr|prod takes effect immediately: only one bot is
+  // ever actually a member of the group at a time (LINE doesn't allow two),
+  // so whichever role is active is always the only one whose signature can
+  // legitimately validate anyway.
+  const verifySignature = (req, res, next) => {
+    const role = botIdentity.getActiveRole();
+    const { channelSecret } = botIdentity.getCredentials(role);
+    if (!channelSecret) {
+      logger.error(`[WEBHOOK] No LINE_${role.toUpperCase()}_CHANNEL_SECRET configured for active role "${role}".`);
+      res.status(500).end();
+      return;
+    }
+    middleware({ channelSecret })(req, res, next);
+  };
 
-  app.post('/webhook', lineMiddleware, (req, res) => {
+  app.post('/webhook', verifySignature, (req, res) => {
     // Ack immediately — LINE expects a fast response, and a slow/failed ack
     // just causes it to retry redelivering the same events. Event
     // processing (Tuya REST calls, LINE replies) happens after; failures
@@ -3036,7 +3266,6 @@ function createWebhookServer() {
 }
 
 module.exports = { createWebhookServer };
-
 ```
 
 ### 8.16 Quiet Mode (`src/services/quietMode.js`)
@@ -3426,9 +3655,20 @@ than routing through `eventCorrelator.js`, so it always bypasses quiet
 mode/ไปพัก entirely — a deliberate daily heartbeat shouldn't go missing
 during a quiet period the same way routine door/motion alerts are meant to.
 
+**Increment 5 addition.** The enabled/disabled check
+(`reportMode.isEnabled()`, Section 8.21) happens inside the `setTimeout`
+callback, not in `start()` — so `/report off`/`/report on` takes effect on
+the very next scheduled run with no restart, and toggling it back on
+doesn't require re-arming anything. Unlike the rest of this file's
+in-memory-only state, `reportMode.js`'s on/off flag *is* persisted (a
+crash-recovery-marker file, same tier as `quietMode.js`'s), since disabling
+the daily report is a deliberate, possibly long-lived choice (e.g. away for
+a while) rather than a transient scheduling detail.
+
 ```javascript
 const logger = require('../utils/logger');
 const statusReport = require('./statusReport');
+const reportMode = require('./reportMode');
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -3486,6 +3726,14 @@ function start(lineService) {
 
     setTimeout(async () => {
       try {
+        // Checked here, not at start() — so /report off (reportMode.js)
+        // takes effect on the very next scheduled run without needing a
+        // restart, and toggling it back on doesn't require re-arming
+        // anything either.
+        if (!reportMode.isEnabled()) {
+          logger.info('[DAILY_REPORT] Skipped — disabled via /report off');
+          return;
+        }
         const message = await statusReport.buildReport(lineService);
         await lineService.pushMessage(message);
         logger.info('[DAILY_REPORT] Sent daily summary');
@@ -3503,6 +3751,186 @@ function start(lineService) {
 }
 
 module.exports = { start };
+```
+
+---
+
+### 8.21 Report Mode (`src/services/reportMode.js`)
+
+**Increment 5 addition.** Persisted on/off toggle for the daily รายงาน push
+(Section 8.20), driven by `/report off`/`/report on` (ปิดรายงาน/เปิดรายงาน,
+Section 8.14). Same crash-recovery-marker tier as `quietMode.js`
+(Section 8.16): the state file's mere *existence* is the disabled signal, no
+JSON contents to parse — `setEnabled(false)` writes an empty file,
+`setEnabled(true)` deletes it. Deliberately persisted (unlike `houseMode.js`/
+`dailyReport.js`'s purely in-memory state) since disabling the daily report
+is usually a deliberate, possibly multi-day choice (e.g. away from home)
+that a restart shouldn't silently undo.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const logger = require('../utils/logger');
+
+// Whether the scheduled daily รายงาน (dailyReport.js) is currently disabled
+// via /report off (ปิดรายงาน) — independent of quiet mode/ไปพัก, which the
+// daily report deliberately bypasses (see dailyReport.js). Persisted the
+// same way quietMode.js's crash-recovery marker is: existence-only signal,
+// not a real state store, so a restart doesn't silently re-enable a report
+// the user explicitly turned off.
+const STATE_FILE = process.env.REPORT_STATE_FILE || path.join(__dirname, '../../report-state.json');
+
+let disabled = fs.existsSync(STATE_FILE);
+
+function isEnabled() {
+  return !disabled;
+}
+
+function setEnabled(value) {
+  disabled = !value;
+  try {
+    if (disabled) {
+      fs.writeFileSync(STATE_FILE, '');
+    } else if (fs.existsSync(STATE_FILE)) {
+      fs.unlinkSync(STATE_FILE);
+    }
+  } catch (err) {
+    logger.error('[REPORT_MODE] Failed to persist state:', err);
+  }
+  logger.info(`[REPORT_MODE] Daily รายงาน ${value ? 'enabled' : 'disabled'}`);
+}
+
+module.exports = { isEnabled, setEnabled };
+```
+
+---
+
+### 8.22 Bot Identity (`src/services/botIdentity.js`)
+
+**Increment 5 addition.** Owns which LINE Official Account credential set
+(`dev`/`prod`/`dr`) the process currently sends/verifies as, driving
+`/switch dr|prod` (Section 8.14). Deliberately does **not** touch LINE group
+membership — LINE gives a bot no API to join a group (only `leaveGroup` to
+remove itself) and doesn't allow two bots to be members of the same group
+chat at once, so `/switch` only ever automates the backend credential swap;
+a human still does the actual leave/invite in the LINE app by hand.
+
+Persisted the same "existence/content is the only contract" tier as
+`quietMode.js`'s crash marker, but with real JSON content this time:
+`{ activeRole, groupIds }`. `LINE_ACTIVE_ROLE` (`.env`) is only the
+*initial* value before the first `/switch` — once `LINE_ROLE_STATE_FILE` has
+been written, it wins on every later boot, so a restart mid-way through a
+switch resumes as the role that was actually being switched to.
+
+Credentials are read per role via `LINE_${ROLE}_CHANNEL_ACCESS_TOKEN`/
+`_CHANNEL_SECRET`/`_GROUP_ID` env vars (`getCredentials`), with `groupId`
+preferring a value learned live from an incoming webhook event
+(`learnGroupId`, called from `interactionRouter.js`'s `_handleEvent`) over
+whatever's in `.env` — a bot's groupId for a given physical group is only
+knowable once it's actually received an event from that group, so a freshly
+manually-invited bot needs zero groupId pre-configuration.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const logger = require('../utils/logger');
+
+// Every credential set this deployment knows about. `dev` is the
+// developer's own local/testing identity, never chat-switchable. `prod`
+// and `dr` are the two real house bots — LINE doesn't allow two bots to be
+// members of the same group chat at once, so exactly one of these two is
+// ever actually sitting in the family group. /switch dr|prod
+// (interactionRouter.js) only ever toggles between these two.
+//
+// This module never touches LINE group membership itself — the human
+// removes/invites the bots by hand in the LINE app. All it owns is: which
+// credential set outgoing messages use (getActiveRole/setActiveRole), and
+// each role's groupId, auto-learned the moment that role's bot is next
+// seen in a group chat (learnGroupId) rather than requiring it to be
+// copied into .env by hand.
+const ALL_ROLES = ['dev', 'prod', 'dr'];
+const SWITCHABLE_ROLES = ['prod', 'dr'];
+
+// Persisted the same "best-effort, existence/content is the only contract"
+// tier as quietMode.js's crash marker — a restart mid-way through a switch
+// should resume as the role that was actually being switched to, not
+// silently fall back to whatever LINE_ACTIVE_ROLE says in .env.
+const STATE_FILE = process.env.LINE_ROLE_STATE_FILE || path.join(__dirname, '../../line-role-state.json');
+
+function _load() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    }
+  } catch (err) {
+    logger.error('[BOT_IDENTITY] Failed to load state:', err);
+  }
+  return {};
+}
+
+const _initialState = _load();
+// LINE_ACTIVE_ROLE is only the *initial* value before the first /switch —
+// once persisted, the state file wins on every later boot.
+let activeRole = _initialState.activeRole || process.env.LINE_ACTIVE_ROLE || 'dev';
+let learnedGroupIds = _initialState.groupIds || {};
+
+function _persist() {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ activeRole, groupIds: learnedGroupIds }));
+  } catch (err) {
+    logger.error('[BOT_IDENTITY] Failed to persist state:', err);
+  }
+}
+
+function getActiveRole() {
+  return activeRole;
+}
+
+function setActiveRole(role) {
+  if (!SWITCHABLE_ROLES.includes(role)) {
+    throw new Error(`Role "${role}" is not switchable — expected one of: ${SWITCHABLE_ROLES.join(', ')}`);
+  }
+  activeRole = role;
+  _persist();
+  logger.info(`[BOT_IDENTITY] Active role switched to "${role}"`);
+}
+
+// groupId prefers a value learned live from an incoming webhook event
+// (interactionRouter.js calls learnGroupId() the moment a role's channel is
+// next seen in a group chat) over whatever's in .env — a bot's groupId for
+// a given physical group is only knowable once it's actually received an
+// event from that group, so a freshly manually-invited bot works with zero
+// pre-configuration.
+function getCredentials(role) {
+  const prefix = `LINE_${role.toUpperCase()}_`;
+  return {
+    accessToken: process.env[`${prefix}CHANNEL_ACCESS_TOKEN`],
+    channelSecret: process.env[`${prefix}CHANNEL_SECRET`],
+    groupId: learnedGroupIds[role] || process.env[`${prefix}GROUP_ID`]
+  };
+}
+
+function isConfigured(role) {
+  const { accessToken, channelSecret } = getCredentials(role);
+  return Boolean(accessToken && channelSecret);
+}
+
+function learnGroupId(role, groupId) {
+  if (!groupId || learnedGroupIds[role] === groupId) return;
+  learnedGroupIds[role] = groupId;
+  _persist();
+  logger.info(`[BOT_IDENTITY] Learned groupId for role "${role}"`);
+}
+
+module.exports = {
+  ALL_ROLES,
+  SWITCHABLE_ROLES,
+  getActiveRole,
+  setActiveRole,
+  getCredentials,
+  isConfigured,
+  learnGroupId
+};
 ```
 
 ---
@@ -3572,6 +4000,19 @@ Phase 1 is complete when all of the following hold:
 * Killing and restarting the process while quiet mode is active (timed or indefinite) produces one explicit "ระบบรีสตาร์ท...กลับมาแจ้งเตือนตามปกติแล้ว" push on the next boot, correctly describing whether the prior quiet was timed or indefinite — not silence, and not a duplicate message on a second consecutive restart (the marker file is consumed on read).
 * `รายงาน` (aliases: `/status all`, `สถานะทั้งหมด`) shows a mode summary line above the device table whenever `houseMode.js` has a last-known arm/disarm (via LINE or the physical remote) or quiet mode is active, each clearly labeled as best-effort ("ล่าสุดที่ทราบ") rather than a verified live state; the section is omitted entirely (not shown as "unknown") when neither applies.
 * Status queries, device control, and arm/disarm all continue to work normally while quiet mode (timed or indefinite) is active — only the automatic Tuya-triggered alert push is ever suppressed, never a direct reply to a user-initiated tap.
+
+### Phase 2 Increment 5 (Battery Normalization, Report Toggle, Prod/DR Bot Switching)
+
+* รีโมท's `battery_percentage` DP (the `sos` profile) produces `BATTERY_LOW`/silence exactly like every other device's battery reading, not `UNKNOWN_EVENT` — verified live against production logs showing the prior raw-JSON spam every few hours, confirmed fixed after the `sos` profile change (Section 8.11).
+* `BATTERY_LOW_THRESHOLD` set to a non-default value (e.g. `50`) changes the cutoff for every profile's `batteryLow()`, not just one — a battery reading between the old default (20) and the new threshold now triggers `BATTERY_LOW` where it previously wouldn't have. Unset falls back to the original hardcoded 20% behavior.
+* `/report off` (or `ปิดรายงาน`) suppresses the next scheduled daily รายงาน push without touching `DAILY_REPORT_TIME`'s schedule itself — `[DAILY_REPORT] Skipped — disabled via /report off` appears in the log at the scheduled time, not `[DAILY_REPORT] Sent daily summary`. `/report on` (`เปิดรายงาน`) re-enables it, effective on the very next scheduled run, no restart required.
+* The report-disabled state survives a process restart (persisted via `REPORT_STATE_FILE`, Section 8.21) — confirmed by disabling, restarting, and observing the next scheduled run still skips.
+* `node src/app.js` boots cleanly with only the currently-active role's `LINE_${ROLE}_CHANNEL_ACCESS_TOKEN`/`_CHANNEL_SECRET` set (Section 8.2) — the old flat `LINE_CHANNEL_ACCESS_TOKEN`/`LINE_CHANNEL_SECRET`/`LINE_GROUP_ID` vars are no longer read anywhere in the codebase.
+* `/switch dr` (typed while `prod` is active) replies a confirmation via the *current* (prod) credentials — verified by observing the reply actually arrives, since a webhook `replyToken` is only valid against the channel that delivered it — then flips the active role; a subsequent webhook signature verified against the `dr` channel secret succeeds where it would have 401'd before the switch.
+* `/switch <role that's already active>` replies "already active," does not call `botIdentity.setActiveRole()` again, and does not touch group membership.
+* `/switch <role with no token/secret configured>` replies a clear "not configured" message instead of throwing or silently no-op'ing.
+* After a bot is manually invited into the LINE group (post-`/switch`), its groupId is captured automatically from its first event there (verified via a bare `join` event, no message required) and persisted — `lineService.pushMessage()` succeeds afterward with no manual `LINE_${ROLE}_GROUP_ID` entry needed in `.env`.
+* Attempting `lineService.pushMessage()` for a role with no groupId learned yet (e.g. immediately after `/switch` but before the manual invite) throws a clear, specific error rather than silently failing or sending to the wrong group.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

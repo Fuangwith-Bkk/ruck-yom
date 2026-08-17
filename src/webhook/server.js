@@ -2,6 +2,7 @@ const express = require('express');
 const { middleware, SignatureValidationFailed } = require('@line/bot-sdk');
 const LineMessagingService = require('../services/lineMessaging');
 const InteractionRouter = require('../services/interactionRouter');
+const botIdentity = require('../services/botIdentity');
 const logger = require('../utils/logger');
 
 // Phase 2: interactive status query & device control, driven entirely by
@@ -13,12 +14,26 @@ function createWebhookServer() {
   const lineService = new LineMessagingService();
   const router = new InteractionRouter(lineService);
 
-  // Verifies the x-line-signature header against LINE_CHANNEL_SECRET and
-  // parses the JSON body — a request that fails signature verification
-  // never reaches the route handler at all.
-  const lineMiddleware = middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET });
+  // Verifies the x-line-signature header against the *currently active*
+  // role's channel secret (botIdentity.js) and parses the JSON body — a
+  // request that fails signature verification never reaches the route
+  // handler at all. Resolved fresh per request (not built once at server
+  // startup) so /switch dr|prod takes effect immediately: only one bot is
+  // ever actually a member of the group at a time (LINE doesn't allow two),
+  // so whichever role is active is always the only one whose signature can
+  // legitimately validate anyway.
+  const verifySignature = (req, res, next) => {
+    const role = botIdentity.getActiveRole();
+    const { channelSecret } = botIdentity.getCredentials(role);
+    if (!channelSecret) {
+      logger.error(`[WEBHOOK] No LINE_${role.toUpperCase()}_CHANNEL_SECRET configured for active role "${role}".`);
+      res.status(500).end();
+      return;
+    }
+    middleware({ channelSecret })(req, res, next);
+  };
 
-  app.post('/webhook', lineMiddleware, (req, res) => {
+  app.post('/webhook', verifySignature, (req, res) => {
     // Ack immediately — LINE expects a fast response, and a slow/failed ack
     // just causes it to retry redelivering the same events. Event
     // processing (Tuya REST calls, LINE replies) happens after; failures
