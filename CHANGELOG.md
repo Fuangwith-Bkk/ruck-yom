@@ -3,6 +3,11 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.4.0] - 2026-08-23
+
+### Changed
+- **เฝ้าบ้าน/ไปพัก no longer ask for confirmation** — typing `เฝ้าบ้าน`/`ไปพัก` (or `/arm`/`/disarm`), and the 🛡️/🛌 buttons in `buildHouseMenu`/`buildGreeting`, now trigger the Tuya scene on the first word or tap. The intermediate `ยืนยันจะ...ใช่ไหมครับ?` prompt (`buildArmDisarmConfirm`, `a=armconfirm`, `_replyArmDisarmConfirm`) is removed: saying ไปพัก is itself the decision, and either mode is reversed instantly by saying the other one, so the extra round-trip bought no safety — unlike physical device on/off (`buildConfirmPrompt`, `a=confirm` → `a=cmd`), which keeps its Yes/No gate because relay/alarm state isn't trivially undone from the chat. The retired `a=armconfirm` postback is kept as a plain alias for `a=armexec`, so quick-reply buttons still sitting in older chat history execute rather than dead-ending on an unrecognized action.
+
 ## [2.3.0] - 2026-08-17
 
 ### Fixed

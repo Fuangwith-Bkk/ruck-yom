@@ -1586,7 +1586,7 @@ structurally dynamic (the category/device lists depend on what's actually in
 `deviceRegistry.json`, and the ดูแลบ้าน/เงียบๆ menu items only appear once
 configured). Postback `data` encodes the whole next navigation step as a
 plain query string (`a=devices&c=door`, `a=status&id=<deviceId>`, `a=all`,
-`a=armconfirm&mode=arm`, `a=armexec&mode=disarm`, `a=quiet&min=30`, `a=wake`,
+`a=armexec&mode=arm`, `a=armexec&mode=disarm`, `a=quiet&min=30`, `a=wake`,
 ...) — no server-side session is needed; every tap is a self-contained
 request, parsed with `URLSearchParams` in `interactionRouter.js`
 (Section 8.14).
@@ -1595,7 +1595,8 @@ request, parsed with `URLSearchParams` in `interactionRouter.js`
 picker (`buildRootMenu()`); `/status`/`สถานะ` skip straight into the สถานะ
 branch's category picker (`buildCategoryMenu()`); `/status all`/
 `สถานะทั้งหมด`/`รายงาน` skip straight to the report table; `/arm`/`เฝ้าบ้าน`
-and `/disarm`/`ไปพัก` skip straight to the arm/disarm Yes/No confirm step.
+and `/disarm`/`ไปพัก` execute the arm/disarm scene immediately, with no
+confirm step (v2.4.0).
 `จัดการ` (`buildManageMenu()`) hides itself if no controllable device is
 registered; `🏠 ดูแลบ้าน` hides itself (`armDisarmAvailable()`) unless both
 `TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID` are set; `🤫 เงียบๆ` is always
@@ -1665,9 +1666,9 @@ function armDisarmAvailable() {
 
 // เมนู -> [สถานะ / จัดการ / ดูแลบ้าน] top-level router. Each branch is only
 // offered if it'd actually have something to show — จัดการ/ดูแลบ้าน hide
-// themselves automatically if there are no controllable devices / scenes
-// aren't configured yet, same "scales with the registry" pattern as the
-// rest of this file.
+// themselves automatically if there are no controllable devices / no remote
+// registered yet, same "scales with the registry" pattern as the rest of
+// this file.
 function buildRootMenu() {
   const items = [
     {
@@ -1787,11 +1788,11 @@ function buildGreeting(botName) {
     items.push(
       {
         type: 'action',
-        action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armconfirm&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
+        action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armexec&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
       },
       {
         type: 'action',
-        action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+        action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armexec&mode=disarm', displayText: '🛌 ไปพัก' }
       }
     );
   }
@@ -1810,11 +1811,12 @@ function buildGreeting(botName) {
 
 // เฝ้าบ้าน (arm) / ไปพัก (disarm) / กลับบ้าน picker — reached either by
 // tapping "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก/
-// กลับบ้าน directly as a shortcut (interactionRouter.js). เฝ้าบ้าน/ไปพัก
-// converge on the confirm step (buildArmDisarmConfirm) before anything is
-// actually sent; กลับบ้าน ("home now") cancels an active quiet period
-// (เงียบๆหน่อย) immediately, same non-destructive/no-confirm-needed
-// reasoning as ตื่นแล้ว.
+// กลับบ้าน directly as a shortcut (interactionRouter.js). All three act
+// immediately (a=armexec / a=wake): asking the user to tap ยืนยัน right
+// after they already said ไปพัก is a step that adds delay without adding
+// safety — both modes are instantly reversible by saying the other one, and
+// the reply message states plainly what changed. Physical device control
+// (buildConfirmPrompt in statusCard.js) still keeps its Yes/No gate.
 function buildHouseMenu() {
   return {
     type: 'text',
@@ -1823,45 +1825,15 @@ function buildHouseMenu() {
       items: [
         {
           type: 'action',
-          action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armconfirm&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
+          action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armexec&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
         },
         {
           type: 'action',
-          action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+          action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armexec&mode=disarm', displayText: '🛌 ไปพัก' }
         },
         {
           type: 'action',
           action: { type: 'postback', label: '🏡 กลับบ้าน', data: 'a=wake', displayText: '🏡 กลับบ้าน' }
-        }
-      ]
-    }
-  };
-}
-
-// Yes/No confirm before actually triggering the arm/disarm Scene — arming or
-// disarming the whole house's security automation is at least as
-// consequential as toggling one relay/alarm, so it gets the same
-// confirm-before-act treatment as buildConfirmPrompt() below.
-function buildArmDisarmConfirm(mode) {
-  const isArm = mode === 'arm';
-  const label = isArm ? 'เฝ้าบ้าน' : 'ไปพัก';
-  return {
-    type: 'text',
-    text: `ยืนยันจะ${label}ใช่ไหมครับ?`,
-    quickReply: {
-      items: [
-        {
-          type: 'action',
-          action: {
-            type: 'postback',
-            label: `✅ ใช่ ${label}เลย`,
-            data: `a=armexec&mode=${mode}`,
-            displayText: `✅ ยืนยัน${label}`
-          }
-        },
-        {
-          type: 'action',
-          action: { type: 'postback', label: '❌ ยกเลิก', data: 'a=cancel', displayText: '❌ ยกเลิก' }
         }
       ]
     }
@@ -1926,7 +1898,6 @@ module.exports = {
   buildDeviceMenu,
   buildManageMenu,
   buildHouseMenu,
-  buildArmDisarmConfirm,
   buildGreeting,
   buildQuietPrompt,
   queryableDevices,
@@ -2611,16 +2582,22 @@ response shown below).
 
 Dispatches parsed webhook events: an argument-less text trigger opens the
 root/category menu; a postback tap advances to the next step (device list,
-status card, control confirm, arm/disarm confirm, history, or quiet-mode
-prompt). All entry points converge on the same handler methods — a typed
-command or bot-name greeting is just a shortcut into a step a tap would also
-reach (Section 2).
+status card, control confirm, history, or quiet-mode prompt). All entry
+points converge on the same handler methods — a typed command or bot-name
+greeting is just a shortcut into a step a tap would also reach (Section 2).
 
-Two state-changing actions both require an explicit two-tap Yes/No confirm
-before anything real happens: `_executeCommand` (relay/alarm on-off, only
-reachable via `a=cmd` after `a=confirm` built the prompt) and
-`_executeArmDisarm` (เฝ้าบ้าน/ไปพัก, only reachable via `a=armexec` after
-`a=armconfirm` built the prompt). `_executeArmDisarm` calls
+Only one state-changing action still requires an explicit two-tap Yes/No
+confirm: `_executeCommand` (relay/alarm on-off, reachable via `a=cmd` only
+after `a=confirm` built the prompt). Physical device state is not trivially
+reversible from the chat, so it keeps the gate.
+
+`_executeArmDisarm` (เฝ้าบ้าน/ไปพัก) does **not** — as of v2.4.0 it fires on
+the first word or tap, with no intermediate prompt. Saying ไปพัก is itself
+the decision, and either mode is undone instantly by saying the other one,
+so the confirm step cost a round-trip without buying any safety. The
+retired `a=armconfirm` postback is kept as a plain alias for `a=armexec`
+so quick-reply buttons still sitting in older chat history keep working
+rather than dead-ending on an unrecognized action. `_executeArmDisarm` calls
 `tuyaRestClient.triggerScene()` (Section 8.13) with
 `TUYA_ARM_SCENE_ID`/`TUYA_DISARM_SCENE_ID`, not a direct device command —
 see Section 8.13's note on why. `_replyAllStatus` delegates to
@@ -2675,7 +2652,6 @@ const {
   buildDeviceMenu,
   buildManageMenu,
   buildHouseMenu,
-  buildArmDisarmConfirm,
   buildGreeting,
   buildQuietPrompt,
   queryableDevices,
@@ -2701,9 +2677,10 @@ const STATUS_MENU_TRIGGERS = new Set(['/status', 'สถานะ']);
 // still works too since there's no reason to break it.
 const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด', 'รายงาน']);
 
-// Shortcut straight into the arm/disarm confirm step (buildArmDisarmConfirm)
-// — also reachable via "🏠 ดูแลบ้าน" in the root menu -> buildHouseMenu.
-// Both converge on the same confirm prompt; neither skips it.
+// Acts immediately — also reachable via "🏠 ดูแลบ้าน" in the root menu ->
+// buildHouseMenu, whose buttons post the same a=armexec. Typing ไปพัก *is*
+// the decision; there's no confirm step in between, matching กลับบ้าน/
+// ตื่นแล้ว which have always acted on the first word.
 const ARM_TRIGGERS = new Set(['/arm', 'เฝ้าบ้าน']);
 const DISARM_TRIGGERS = new Set(['/disarm', 'ไปพัก']);
 
@@ -2773,12 +2750,12 @@ class InteractionRouter {
     }
 
     if (ARM_TRIGGERS.has(text)) {
-      await this._replyArmDisarmConfirm(event.replyToken, 'arm');
+      await this._executeArmDisarm(event.replyToken, 'arm');
       return;
     }
 
     if (DISARM_TRIGGERS.has(text)) {
-      await this._replyArmDisarmConfirm(event.replyToken, 'disarm');
+      await this._executeArmDisarm(event.replyToken, 'disarm');
       return;
     }
 
@@ -2907,13 +2884,11 @@ class InteractionRouter {
       return;
     }
 
-    if (action === 'armconfirm') {
-      const mode = params.get('mode');
-      await this._replyArmDisarmConfirm(event.replyToken, mode);
-      return;
-    }
-
-    if (action === 'armexec') {
+    // armconfirm is the pre-v2.4 postback that used to open a Yes/No
+    // prompt. Buttons carrying it may still be sitting in older chat
+    // history, so it's kept as a plain alias for armexec rather than
+    // dead-ending on "Unrecognized postback action".
+    if (action === 'armexec' || action === 'armconfirm') {
       const mode = params.get('mode');
       await this._executeArmDisarm(event.replyToken, mode);
       return;
@@ -2938,21 +2913,13 @@ class InteractionRouter {
     logger.debug('[INTERACTION_ROUTER] Unrecognized postback action:', action);
   }
 
-  async _replyArmDisarmConfirm(replyToken, mode) {
-    if (!armDisarmAvailable()) {
-      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังตั้งค่าเฝ้าบ้าน/ไปพักไม่เสร็จครับ' });
-      return;
-    }
-    await this.lineService.replyMessage(replyToken, buildArmDisarmConfirm(mode));
-  }
-
-  // The only place a real arm/disarm command is ever sent — only reachable
-  // after the confirm prompt's "✅ ใช่" tap, same pattern as
-  // _executeCommand. Triggers the pre-built "Arm"/"Disarm" Tap-to-Run Scene
-  // (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than commanding the
-  // Security Remote Control directly — that was tried first and rejected by
-  // Tuya (error 2008), since that device can transmit button-press events
-  // but can't receive downlink commands. Tuya's own automation engine
+  // The only place a real arm/disarm command is ever sent — reached
+  // directly from a เฝ้าบ้าน/ไปพัก word or button, with no confirm step in
+  // between (see ARM_TRIGGERS above). Triggers the pre-built "Arm"/"Disarm"
+  // Tap-to-Run Scene (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than
+  // commanding the Security Remote Control directly — that was tried first
+  // and rejected by Tuya (error 2008), since that device can transmit
+  // button-press events but can't receive downlink commands. Tuya's own automation engine
   // (enabled/disabled by the scene's own actions) remains the authoritative
   // armed/disarmed state; houseMode.js only remembers the bot's own last
   // action for display purposes (รายงาน), and is not treated as fact here.
@@ -2963,6 +2930,11 @@ class InteractionRouter {
   // the house," away) is the opposite: you want full vigilance, so it always
   // resumes alerts even if a previous ไปพัก/เงียบๆหน่อย left quiet mode on.
   async _executeArmDisarm(replyToken, mode) {
+    if (!armDisarmAvailable()) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังตั้งค่าเฝ้าบ้าน/ไปพักไม่เสร็จครับ' });
+      return;
+    }
+
     const sceneId = mode === 'arm' ? process.env.TUYA_ARM_SCENE_ID : process.env.TUYA_DISARM_SCENE_ID;
     const label = mode === 'arm' ? 'เฝ้าบ้าน' : 'ไปพัก';
     if (!sceneId) {

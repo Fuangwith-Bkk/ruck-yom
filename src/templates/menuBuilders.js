@@ -180,11 +180,11 @@ function buildGreeting(botName) {
     items.push(
       {
         type: 'action',
-        action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armconfirm&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
+        action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armexec&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
       },
       {
         type: 'action',
-        action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+        action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armexec&mode=disarm', displayText: '🛌 ไปพัก' }
       }
     );
   }
@@ -203,11 +203,12 @@ function buildGreeting(botName) {
 
 // เฝ้าบ้าน (arm) / ไปพัก (disarm) / กลับบ้าน picker — reached either by
 // tapping "🏠 ดูแลบ้าน" in the category menu, or typing เฝ้าบ้าน/ไปพัก/
-// กลับบ้าน directly as a shortcut (interactionRouter.js). เฝ้าบ้าน/ไปพัก
-// converge on the confirm step (buildArmDisarmConfirm) before anything is
-// actually sent; กลับบ้าน ("home now") cancels an active quiet period
-// (เงียบๆหน่อย) immediately, same non-destructive/no-confirm-needed
-// reasoning as ตื่นแล้ว.
+// กลับบ้าน directly as a shortcut (interactionRouter.js). All three act
+// immediately (a=armexec / a=wake): asking the user to tap ยืนยัน right
+// after they already said ไปพัก is a step that adds delay without adding
+// safety — both modes are instantly reversible by saying the other one, and
+// the reply message states plainly what changed. Physical device control
+// (buildConfirmPrompt in statusCard.js) still keeps its Yes/No gate.
 function buildHouseMenu() {
   return {
     type: 'text',
@@ -216,45 +217,15 @@ function buildHouseMenu() {
       items: [
         {
           type: 'action',
-          action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armconfirm&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
+          action: { type: 'postback', label: '🛡️ เฝ้าบ้าน', data: 'a=armexec&mode=arm', displayText: '🛡️ เฝ้าบ้าน' }
         },
         {
           type: 'action',
-          action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armconfirm&mode=disarm', displayText: '🛌 ไปพัก' }
+          action: { type: 'postback', label: '🛌 ไปพัก', data: 'a=armexec&mode=disarm', displayText: '🛌 ไปพัก' }
         },
         {
           type: 'action',
           action: { type: 'postback', label: '🏡 กลับบ้าน', data: 'a=wake', displayText: '🏡 กลับบ้าน' }
-        }
-      ]
-    }
-  };
-}
-
-// Yes/No confirm before actually sending the arm/disarm DP command — arming
-// or disarming the whole house's security automation is at least as
-// consequential as toggling one relay/alarm, so it gets the same
-// confirm-before-act treatment (Section 8.12's buildConfirmPrompt).
-function buildArmDisarmConfirm(mode) {
-  const isArm = mode === 'arm';
-  const label = isArm ? 'เฝ้าบ้าน' : 'ไปพัก';
-  return {
-    type: 'text',
-    text: `ยืนยันจะ${label}ใช่ไหมครับ?`,
-    quickReply: {
-      items: [
-        {
-          type: 'action',
-          action: {
-            type: 'postback',
-            label: `✅ ใช่ ${label}เลย`,
-            data: `a=armexec&mode=${mode}`,
-            displayText: `✅ ยืนยัน${label}`
-          }
-        },
-        {
-          type: 'action',
-          action: { type: 'postback', label: '❌ ยกเลิก', data: 'a=cancel', displayText: '❌ ยกเลิก' }
         }
       ]
     }
@@ -319,7 +290,6 @@ module.exports = {
   buildDeviceMenu,
   buildManageMenu,
   buildHouseMenu,
-  buildArmDisarmConfirm,
   buildGreeting,
   buildQuietPrompt,
   queryableDevices,

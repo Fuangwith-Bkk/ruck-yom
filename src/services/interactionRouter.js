@@ -12,7 +12,6 @@ const {
   buildDeviceMenu,
   buildManageMenu,
   buildHouseMenu,
-  buildArmDisarmConfirm,
   buildGreeting,
   buildQuietPrompt,
   queryableDevices,
@@ -38,9 +37,10 @@ const STATUS_MENU_TRIGGERS = new Set(['/status', 'สถานะ']);
 // still works too since there's no reason to break it.
 const ALL_STATUS_TRIGGERS = new Set(['/status all', 'สถานะทั้งหมด', 'รายงาน']);
 
-// Shortcut straight into the arm/disarm confirm step (buildArmDisarmConfirm)
-// — also reachable via "🏠 ดูแลบ้าน" in the root menu -> buildHouseMenu.
-// Both converge on the same confirm prompt; neither skips it.
+// Acts immediately — also reachable via "🏠 ดูแลบ้าน" in the root menu ->
+// buildHouseMenu, whose buttons post the same a=armexec. Typing ไปพัก *is*
+// the decision; there's no confirm step in between, matching กลับบ้าน/
+// ตื่นแล้ว which have always acted on the first word.
 const ARM_TRIGGERS = new Set(['/arm', 'เฝ้าบ้าน']);
 const DISARM_TRIGGERS = new Set(['/disarm', 'ไปพัก']);
 
@@ -110,12 +110,12 @@ class InteractionRouter {
     }
 
     if (ARM_TRIGGERS.has(text)) {
-      await this._replyArmDisarmConfirm(event.replyToken, 'arm');
+      await this._executeArmDisarm(event.replyToken, 'arm');
       return;
     }
 
     if (DISARM_TRIGGERS.has(text)) {
-      await this._replyArmDisarmConfirm(event.replyToken, 'disarm');
+      await this._executeArmDisarm(event.replyToken, 'disarm');
       return;
     }
 
@@ -244,13 +244,11 @@ class InteractionRouter {
       return;
     }
 
-    if (action === 'armconfirm') {
-      const mode = params.get('mode');
-      await this._replyArmDisarmConfirm(event.replyToken, mode);
-      return;
-    }
-
-    if (action === 'armexec') {
+    // armconfirm is the pre-v2.4 postback that used to open a Yes/No
+    // prompt. Buttons carrying it may still be sitting in older chat
+    // history, so it's kept as a plain alias for armexec rather than
+    // dead-ending on "Unrecognized postback action".
+    if (action === 'armexec' || action === 'armconfirm') {
       const mode = params.get('mode');
       await this._executeArmDisarm(event.replyToken, mode);
       return;
@@ -275,21 +273,13 @@ class InteractionRouter {
     logger.debug('[INTERACTION_ROUTER] Unrecognized postback action:', action);
   }
 
-  async _replyArmDisarmConfirm(replyToken, mode) {
-    if (!armDisarmAvailable()) {
-      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังตั้งค่าเฝ้าบ้าน/ไปพักไม่เสร็จครับ' });
-      return;
-    }
-    await this.lineService.replyMessage(replyToken, buildArmDisarmConfirm(mode));
-  }
-
-  // The only place a real arm/disarm command is ever sent — only reachable
-  // after the confirm prompt's "✅ ใช่" tap, same pattern as
-  // _executeCommand. Triggers the pre-built "Arm"/"Disarm" Tap-to-Run Scene
-  // (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than commanding the
-  // Security Remote Control directly — that was tried first and rejected by
-  // Tuya (error 2008), since that device can transmit button-press events
-  // but can't receive downlink commands. Tuya's own automation engine
+  // The only place a real arm/disarm command is ever sent — reached
+  // directly from a เฝ้าบ้าน/ไปพัก word or button, with no confirm step in
+  // between (see ARM_TRIGGERS above). Triggers the pre-built "Arm"/"Disarm"
+  // Tap-to-Run Scene (TUYA_ARM_SCENE_ID / TUYA_DISARM_SCENE_ID) rather than
+  // commanding the Security Remote Control directly — that was tried first
+  // and rejected by Tuya (error 2008), since that device can transmit
+  // button-press events but can't receive downlink commands. Tuya's own automation engine
   // (enabled/disabled by the scene's own actions) remains the authoritative
   // armed/disarmed state; houseMode.js only remembers the bot's own last
   // action for display purposes (รายงาน), and is not treated as fact here.
@@ -300,6 +290,11 @@ class InteractionRouter {
   // the house," away) is the opposite: you want full vigilance, so it always
   // resumes alerts even if a previous ไปพัก/เงียบๆหน่อย left quiet mode on.
   async _executeArmDisarm(replyToken, mode) {
+    if (!armDisarmAvailable()) {
+      await this.lineService.replyMessage(replyToken, { type: 'text', text: 'ยังตั้งค่าเฝ้าบ้าน/ไปพักไม่เสร็จครับ' });
+      return;
+    }
+
     const sceneId = mode === 'arm' ? process.env.TUYA_ARM_SCENE_ID : process.env.TUYA_DISARM_SCENE_ID;
     const label = mode === 'arm' ? 'เฝ้าบ้าน' : 'ไปพัก';
     if (!sceneId) {
