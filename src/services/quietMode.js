@@ -20,6 +20,12 @@ let quietUntil = null;
 let quietIndefinite = false;
 let wakeTimer = null;
 let durationPromptExpiresAt = null;
+// Date.now() of the most recent ไปพัก. eventCorrelator.js compares it
+// against the moment a correlation window opened, so a window that was
+// already collecting events when ไปพัก started can never flush afterwards —
+// including when ไปพัก arrives by LINE command rather than by the remote,
+// which the correlator has no other way to observe.
+let lastIndefiniteQuietAt = 0;
 
 // How long after prompting for a duration a bare typed number is still
 // understood as the answer — kept short so a coincidental, unrelated number
@@ -28,6 +34,22 @@ const DURATION_PROMPT_TTL_MS = 2 * 60 * 1000;
 
 function isQuiet() {
   return quietIndefinite || (quietUntil !== null && Date.now() < quietUntil);
+}
+
+// True only for the ไปพัก (disarm) flavour of quiet, not a timed
+// เงียบๆหน่อย. The two mean different things and eventCorrelator.js treats
+// them differently: ไปพัก is "I'm home, the house is disarmed, tell me
+// nothing at all", so even a siren stays silent; a timed เงียบๆหน่อย is
+// "stop the routine chatter for N minutes" while the house is still armed,
+// so a genuine emergency must still get through.
+function isIndefiniteQuiet() {
+  return quietIndefinite;
+}
+
+// Timestamp of the last ไปพัก, or 0 if there has never been one this
+// process. See lastIndefiniteQuietAt above.
+function indefiniteQuietStartedAt() {
+  return lastIndefiniteQuietAt;
 }
 
 // null means "quiet with no countdown" (indefinite) — distinct from 0
@@ -88,6 +110,7 @@ function setIndefiniteQuiet() {
   }
   quietUntil = null;
   quietIndefinite = true;
+  lastIndefiniteQuietAt = Date.now();
   _writeMarker({ indefinite: true });
   logger.info('[QUIET_MODE] Activated indefinitely (ไปพัก)');
 }
@@ -135,6 +158,8 @@ function readCrashMarker() {
 
 module.exports = {
   isQuiet,
+  isIndefiniteQuiet,
+  indefiniteQuietStartedAt,
   remainingMinutes,
   setQuiet,
   setIndefiniteQuiet,

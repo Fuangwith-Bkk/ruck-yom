@@ -3,6 +3,17 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.5.0] - 2026-09-09
+
+### Changed
+- **One date format everywhere: `DD-MMM-YY HH.mm.ss`** — every LINE message now stamps `04-Sep-26 10.08.08` instead of `04/09/26 10:08:08`, and `CHAIN_ESCALATION` lines read `(10.08.15)`. A named month can't be misread as `MM/DD` the way a numeric `DD/MM/YY` can; `en-GB` renders September as the 4-letter `Sept`, so `getBangkokDateParts()` trims the month to three letters to keep the width even. `getBangkokHistoryTimestamp()` is removed and `historyCard.js` now uses `getBangkokTimestamp()`, so device history and live alerts share one format. Log lines keep the sortable `YYYY-MM-DD HH:mm:ss.SSS`.
+- **Physical remote wording** — `กดไปพักจากรีโมท` → `กดรีโมท ให้ไปพัก` in chain lines, and `มีคนกดไปพักจากรีโมทครับ ไปพักเรียบร้อยครับ 🤫 …` → `กดรีโมท ให้ไปพัก ครับ ผมไปพักก่อนนะครับ 🤫 …`. เฝ้าบ้าน mirrored.
+- **ไปพัก now means total silence.** Previously `CRITICAL_EVENT_TYPES` let `ALARM_ON`, `ALARM_OFF`, `WATER_LEAK` and the remote events bypass quiet mode regardless of which kind of quiet was active. The two kinds now differ: **ไปพัก** (indefinite, house disarmed, user home) sends nothing at all except the ไปพัก/เฝ้าบ้าน acknowledgement — the scheduled daily รายงาน included; a timed **เงียบๆหน่อย** (house still armed) is unchanged and still lets `EMERGENCY_EVENT_TYPES` (`ALARM_ON`, `WATER_LEAK`, `SMOKE_DETECTED`) through. Replies to a user's own command or button tap are unaffected.
+
+### Fixed
+- **Stale `CHAIN_ESCALATION` delivered a minute late, during ไปพัก** — observed in production 2026-09-04 (`logs/ruck-yom-2026-09-04-1.log`, 10:09:23, reporting events from 10:08:23–10:08:53 while the house had been in ไปพัก since 10:08:15). Three causes, all fixed: (a) `ALARM_OFF` counted as critical and `containsCritical` was a `.some()` over every line, so one `ALARM_OFF` dragged the routine door lines in its window out to LINE with it — `ALARM_OFF` is no longer an emergency type and the flag is now `containsEmergency`; (b) a `REMOTE_DISARMED` opened a correlation window, putting the ไปพัก confirmation at the head of a window that then collected the user walking out of the house half a minute later — mode acknowledgements now short-circuit straight to the push and never open or join a window, and a `REMOTE_DISARMED` discards any window already open; (c) a window opened before a ไปพัก could still flush afterwards — `_flush()` now compares the window's `openedAt` against `quietMode.indefiniteQuietStartedAt()` and drops any window that spanned one, which also covers ไปพัก arriving as a LINE command, where the correlator sees nothing.
+- **Restart during ไปพัก silently resumed full alerting** — `readCrashMarker()` consumes the marker and the boot recovery set `houseMode` to `disarm` from Tuya's automation state without restoring `quietMode`, so the bot came back believing the house was at rest while notifying on everything, and announced "กลับมาแจ้งเตือนตามปกติแล้วนะครับ" to say so. Boot recovery now re-enters indefinite quiet when the automation reads `disable`, and the restart notice is deferred until after that decision so it can't contradict it — skipped when still resting, unchanged when armed or when the Tuya read fails.
+
 ## [2.4.0] - 2026-08-23
 
 ### Changed

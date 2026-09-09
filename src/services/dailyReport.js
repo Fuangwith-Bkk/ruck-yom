@@ -1,6 +1,7 @@
 const logger = require('../utils/logger');
 const statusReport = require('./statusReport');
 const reportMode = require('./reportMode');
+const quietMode = require('./quietMode');
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -39,10 +40,10 @@ function msUntilNext(hhmm) {
 // in-memory: a restart around the scheduled time just skips that day's
 // report rather than replaying it — same best-effort tier as houseMode.js/
 // quietMode.js's in-memory state, not worth a persistence layer for a daily
-// nicety. Deliberately pushes directly via lineService rather than routing
-// through eventCorrelator, so it always bypasses quiet mode/ไปพัก — a
-// deliberate daily heartbeat shouldn't go missing during a quiet period the
-// same way routine door/motion alerts are meant to.
+// nicety. Pushes directly via lineService rather than routing through
+// eventCorrelator, so a timed เงียบๆหน่อย doesn't swallow it — a deliberate
+// daily heartbeat shouldn't go missing the way routine door/motion alerts
+// are meant to. ไปพัก is the one exception, checked at send time below.
 function start(lineService) {
   const time = process.env.DAILY_REPORT_TIME;
   if (!time) return;
@@ -64,6 +65,14 @@ function start(lineService) {
         // anything either.
         if (!reportMode.isEnabled()) {
           logger.info('[DAILY_REPORT] Skipped — disabled via /report off');
+          return;
+        }
+        // ไปพัก means the bot says nothing at all until เฝ้าบ้าน or
+        // กลับบ้าน — the daily heartbeat included. Checked here rather than
+        // at schedule time so a ไปพัก that ends before tomorrow's run
+        // doesn't need anything re-armed.
+        if (quietMode.isIndefiniteQuiet()) {
+          logger.info('[DAILY_REPORT] Skipped — ไปพัก');
           return;
         }
         const message = await statusReport.buildReport(lineService);

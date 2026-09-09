@@ -344,7 +344,7 @@ DoD). A DP code not listed for a device's profile (including a device with
 no `dpProfile` registered at all) becomes `UNKNOWN_EVENT` — never guessed at
 using another profile's meaning.
 
-Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside the full `timestamp` (`DD/MM/YY HH:MM:ss`) — `time` is only used by the Event Correlator (Section 8.8) for the per-line stamps inside a consolidated chain message; every standalone message still renders the full `timestamp`.
+Every event also carries a short `time` field (`HH.mm.ss`, Bangkok) alongside the full `timestamp` (`DD-MMM-YY HH.mm.ss`) — `time` is only used by the Event Correlator (Section 8.8) for the per-line stamps inside a consolidated chain message; every standalone message still renders the full `timestamp`.
 
 ---
 
@@ -363,8 +363,8 @@ Every event also carries a short `time` field (`HH:MM:ss`, Bangkok) alongside th
   "RELAY_ON": "{{deviceName}} เปิดแล้วนะครับ\n{{timestamp}}",
   "RELAY_OFF": "{{deviceName}} ปิดแล้วนะครับ\n{{timestamp}}",
   "BATTERY_LOW": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} แบตใกล้หมดแล้ว เหลือ {{batteryLevel}}% เอง กลัวมันหมดแล้วเฝ้าบ้านไม่ได้ครับ ช่วยไปเปลี่ยนแบตให้หน่อยนะครับ\n{{timestamp}}",
-  "REMOTE_ARMED": "มีคนกดเฝ้าบ้านจากรีโมทครับ เฝ้าบ้านเรียบร้อยครับ แจ้งเตือนตามปกติครับ\n{{timestamp}}",
-  "REMOTE_DISARMED": "มีคนกดไปพักจากรีโมทครับ ไปพักเรียบร้อยครับ 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ\n{{timestamp}}",
+  "REMOTE_ARMED": "กดรีโมท ให้เฝ้าบ้าน ครับ ผมเฝ้าบ้านให้นะครับ แจ้งเตือนตามปกติครับ\n{{timestamp}}",
+  "REMOTE_DISARMED": "กดรีโมท ให้ไปพัก ครับ ผมไปพักก่อนนะครับ 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ\n{{timestamp}}",
   "UNKNOWN_EVENT": "{{botName}} ได้รับแจ้งว่า\nอุปกรณ์ {{deviceName}}\nตรวจพบว่า {{rawPayload}}\nช่วย {{botName}} ดูหน่อยนะครับ\n{{timestamp}}",
   "CHAIN_ESCALATION": "{{botName}}วิ่งมาบอกครับ! มีเหตุการณ์ต่อเนื่องเกิดขึ้นครับ:\n{{lines}}\n{{timestamp}}"
 }
@@ -455,42 +455,54 @@ module.exports = { validateEnv };
 ### 8.3 Timezone Utility (`src/utils/dateTime.js`)
 
 ```javascript
+// `month: 'short'` (Sep, not 09) is deliberate for every user-facing string:
+// a named month can't be misread as MM/DD by a reader used to a different
+// date convention, which a numeric DD/MM/YY always could.
 function getBangkokDateParts(date = new Date()) {
   return new Intl.DateTimeFormat('en-GB', {
     timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
     day: '2-digit',
-    month: '2-digit',
+    month: 'short',
     year: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
     hour12: false
   }).formatToParts(date).reduce((acc, part) => {
-    acc[part.type] = part.value;
+    // en-GB renders September as the 4-letter "Sept" and every other month
+    // as 3 letters. Trimming to 3 keeps the column width of a history list
+    // even and the format predictable: 04-Sep-26, never 04-Sept-26.
+    acc[part.type] = part.type === 'month' ? part.value.slice(0, 3) : part.value;
     return acc;
   }, {});
 }
 
-// DD/MM/YY HH:MM:ss — used at the end of every LINE alert message.
+// DD-MMM-YY HH.mm.ss (e.g. "04-Sep-26 10.08.08") — the single display format
+// for every LINE message: standalone alerts, the trailing stamp on a chain
+// escalation, and device history rows. Seconds are kept because the whole
+// point of a security log is telling apart events a second or two apart (a
+// door re-open that re-triggers the siren, say); the dot separator matches
+// how time is normally written in Thai.
 function getBangkokTimestamp(date = new Date()) {
   const p = getBangkokDateParts(date);
-  return `${p.day}/${p.month}/${p.year} ${p.hour}:${p.minute}:${p.second}`;
+  return `${p.day}-${p.month}-${p.year} ${p.hour}.${p.minute}.${p.second}`;
 }
 
-// HH:MM:ss only — used for the per-line timestamps inside a consolidated
+// HH.mm.ss only — used for the per-line timestamps inside a consolidated
 // (multi-event) chain escalation message, where each line needs its own
 // time but repeating the full date on every line would be noise.
 function getBangkokTime(date = new Date()) {
   const p = getBangkokDateParts(date);
-  return `${p.hour}:${p.minute}:${p.second}`;
+  return `${p.hour}.${p.minute}.${p.second}`;
 }
 
 // YYYY-MM-DD HH:mm:ss.SSS (Bangkok) — used for log file lines, so they
 // align with `date` on the server instead of the raw UTC that
 // `new Date().toISOString()` would give, and sort correctly as plain text.
-// getBangkokDateParts() uses a 2-digit year for the DD/MM/YY display
-// timestamp above; logs need an unambiguous 4-digit year, so this computes
-// its own parts rather than reusing that shared helper.
+// getBangkokDateParts() uses a 2-digit year and a named month for the
+// DD-MMM-YY display timestamp above; logs need an unambiguous 4-digit year
+// and a numeric month to sort, so this computes its own parts rather than
+// reusing that shared helper.
 function getBangkokLogTimestamp(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
@@ -510,31 +522,7 @@ function getBangkokLogTimestamp(date = new Date()) {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
 }
 
-// DD MMM YY HH:mm:ss (e.g. "16 Aug 26 00:52:01") — used for device history
-// lines (historyCard.js, Section 8.18), which can span up to a week. Unlike
-// getBangkokTimestamp's DD/MM/YY, a named month reads faster at a glance
-// down a list of rows and can't be misread as MM/DD by a reader used to a
-// different date convention. Computes its own parts (like
-// getBangkokLogTimestamp above) rather than reusing getBangkokDateParts,
-// since that helper's month is numeric, not a name.
-function getBangkokHistoryTimestamp(date = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
-    day: '2-digit',
-    month: 'short',
-    year: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(date).reduce((acc, part) => {
-    acc[part.type] = part.value;
-    return acc;
-  }, {});
-  return `${parts.day} ${parts.month} ${parts.year} ${parts.hour}:${parts.minute}:${parts.second}`;
-}
-
-module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp, getBangkokHistoryTimestamp };
+module.exports = { getBangkokTimestamp, getBangkokTime, getBangkokLogTimestamp };
 
 ```
 
@@ -822,22 +810,45 @@ event, that event is sent as its own normal standalone alert instead of
 being wrapped in a single-line `CHAIN_ESCALATION` — consolidation only
 kicks in once there's actually more than one thing to summarize.
 
-**Increment 3 addition — quiet mode gate + critical-event bypass.** `_push()`
-is the single choke point every LINE alert push goes through, so it's also
-where `quietMode.js` (Section 8.16) is checked: if quiet mode is active
-(timed, via เงียบๆหน่อย, or indefinite, via an automatic ไปพัก), the push is
-skipped and logged instead of sent. `CRITICAL_EVENT_TYPES` (`ALARM_ON`,
-`ALARM_OFF`, `WATER_LEAK`, a pre-emptive `SMOKE_DETECTED` for when a smoke
-sensor is eventually added, and `REMOTE_ARMED`/`REMOTE_DISARMED`) always
-bypass this gate — neither a manual quiet request nor the automatic ไปพัก
-quiet should be able to hide a real emergency, and a REMOTE_DISARMED
-confirmation must still get through even though it just set the very
-indefinite quiet that would otherwise suppress it (app.js, Section 8.5).
-Because a burst of routine events can still fold a critical one
-into a single `CHAIN_ESCALATION` message, `_flush()` also tags that
-synthetic event with `containsCritical` if any of its consolidated lines
-were critical, so the whole message still bypasses the gate rather than only
-a would-be-standalone critical event doing so.
+**Quiet mode gate — two flavours, two rules.** `_push()` is the single choke
+point every LINE alert push goes through, so it's also where `quietMode.js`
+(Section 8.16) is checked. The two kinds of quiet make different promises
+and are treated differently:
+
+* **ไปพัก (indefinite, `quietMode.isIndefiniteQuiet()`)** — the house is
+  disarmed and the user is in it. Nothing is sent at all, not even a real
+  siren. The only exception is the mode acknowledgement itself
+  (`MODE_CONFIRMATION_EVENT_TYPES` = `REMOTE_ARMED`/`REMOTE_DISARMED`),
+  which must get through because app.js (Section 8.9) and
+  interactionRouter.js (Section 8.14) both turn quiet mode on *before*
+  pushing the confirmation — without the exemption it would silence itself.
+* **เงียบๆหน่อย (timed)** — the house is still armed, the user just wants the
+  routine chatter to stop for N minutes. `EMERGENCY_EVENT_TYPES`
+  (`ALARM_ON`, `WATER_LEAK`, and a pre-emptive `SMOKE_DETECTED` for when a
+  smoke sensor is eventually added) still push through, and `_flush()` tags
+  a consolidated message with `containsEmergency` if any of its lines
+  qualify, so an `ALARM_ON` folded into a burst isn't lost.
+
+`ALARM_OFF` is deliberately **not** an emergency type. It used to be, and
+because a chain inherited criticality from any single line, one `ALARM_OFF`
+dragged every routine door/motion line sharing its window out to LINE with
+it — the cause of the stale chain escalation observed in production on
+2026-09-04 (`logs/ruck-yom-2026-09-04-1.log`, 10:09:23).
+
+**Mode acknowledgements never enter a window.** `process()` short-circuits
+`REMOTE_ARMED`/`REMOTE_DISARMED` straight to `_push()`: they are the bot
+confirming it heard you, not incidents. Letting one *open* a window put a
+ไปพัก confirmation at the head of a correlation window that then collected
+the user walking out of the house a half-minute later; letting one be
+*buffered* would instead hide the confirmation inside a chain that ไปพัก's
+own quiet would go on to suppress. A `REMOTE_DISARMED` additionally calls
+`_discardWindow()`, dropping whatever the open window had buffered —
+that activity is pre-ไปพัก and the user has just declared it to be
+themselves. For the ไปพัก that arrives as a LINE command instead (which the
+correlator never sees), `_flush()` compares the window's `openedAt` against
+`quietMode.indefiniteQuietStartedAt()` and drops any window that spanned a
+ไปพัก, covering the case where a later เฝ้าบ้าน has already cleared the quiet
+by the time the window's timer fires.
 
 ```javascript
 const logger = require('../utils/logger');
@@ -856,8 +867,8 @@ const CLAUSES = {
   RELAY_OFF: (event) => `ปิด ${event.deviceName}`,
   WATER_LEAK: (event) => `น้ำรั่วที่ ${event.deviceName}`,
   BATTERY_LOW: (event) => `${event.deviceName} แบตเหลือ ${event.batteryLevel}%`,
-  REMOTE_ARMED: () => 'กดเฝ้าบ้านจากรีโมท',
-  REMOTE_DISARMED: () => 'กดไปพักจากรีโมท',
+  REMOTE_ARMED: () => 'กดรีโมท ให้เฝ้าบ้าน',
+  REMOTE_DISARMED: () => 'กดรีโมท ให้ไปพัก',
   UNKNOWN_EVENT: (event) => `${event.deviceName} มีเหตุการณ์ไม่ทราบสาเหตุ`
 };
 
@@ -866,24 +877,33 @@ const CLAUSES = {
 // worst-case event has already happened.
 const TERMINAL_EVENT = 'ALARM_ON';
 
-// Genuinely critical eventTypes always push, regardless of quiet mode —
-// neither the manual เงียบๆหน่อย nor the automatic ไปพัก-indefinite quiet
-// should be able to hide a real emergency. ALARM_OFF rides along with
-// ALARM_ON so the "all clear" follow-up is never silently swallowed while
-// the ALARM_ON itself got through. SMOKE_DETECTED is included pre-emptively
-// for when a smoke sensor is added — no such device/dpProfile exists yet
-// (TUYA_DEVICE_DP_REGISTRY.md/dpProfiles.js), but the moment one is, it
-// should bypass quiet mode without anyone having to remember to update this
-// list again. REMOTE_ARMED/REMOTE_DISARMED are included too: app.js sets
-// quietMode indefinite *before* pushing the REMOTE_DISARMED confirmation, so
-// without this the confirmation would suppress itself.
-const CRITICAL_EVENT_TYPES = new Set([
+// The two mode acknowledgements. These are not incidents — they're the
+// bot confirming it heard you — so they get their own path in process()
+// below: never buffered into a correlation window, never folded into a
+// CHAIN_ESCALATION, and never suppressed by quiet mode. Without the last
+// part the ไปพัก confirmation would silence itself, since app.js and
+// interactionRouter.js both turn quiet mode on *before* the confirmation
+// is pushed.
+const MODE_CONFIRMATION_EVENT_TYPES = new Set(['REMOTE_ARMED', 'REMOTE_DISARMED']);
+
+// Emergencies that still get through a *timed* เงียบๆหน่อย. That flavour of
+// quiet means "stop the routine chatter for N minutes" while the house is
+// still armed, so a real siren or a leak must not be swallowed. ไปพัก is a
+// different promise entirely — see the isIndefiniteQuiet() branch in
+// _push(). SMOKE_DETECTED is listed pre-emptively for when a smoke sensor
+// is added (no such device/dpProfile exists yet — see
+// TUYA_DEVICE_DP_REGISTRY.md/dpProfiles.js) so it bypasses timed quiet the
+// moment one appears, without anyone having to remember this list.
+//
+// ALARM_OFF is deliberately NOT here. It used to be, so the "all clear"
+// would follow an ALARM_ON that had already got through — but because a
+// chain escalation inherited criticality from any single line, one ALARM_OFF
+// dragged every routine door/motion line in its window out to LINE as well.
+// That is exactly what produced the stale 10:09:23 chain on 2026-09-04.
+const EMERGENCY_EVENT_TYPES = new Set([
   'ALARM_ON',
-  'ALARM_OFF',
   'WATER_LEAK',
-  'SMOKE_DETECTED',
-  'REMOTE_ARMED',
-  'REMOTE_DISARMED'
+  'SMOKE_DETECTED'
 ]);
 
 const windowMs = () => Number(process.env.EVENT_CORRELATION_WINDOW_MS) || 15000;
@@ -906,6 +926,26 @@ class EventCorrelator {
   async process(event) {
     const { eventType } = event;
 
+    // Mode acknowledgements short-circuit everything: push once, immediately,
+    // and don't touch the window. Letting one open a window was what put the
+    // 10:08:22 ไปพัก confirmation at the head of a 60s window that then
+    // collected the user walking out the door at 10:08:53; letting one be
+    // *buffered* would instead hide the confirmation inside a chain that
+    // ไปพัก's own quiet mode would go on to suppress.
+    if (MODE_CONFIRMATION_EVENT_TYPES.has(eventType)) {
+      if (eventType === 'REMOTE_DISARMED') this._discardWindow();
+      await this._push(event);
+      return;
+    }
+
+    // In ไปพัก nothing but the acknowledgement above is ever sent, so there
+    // is nothing worth correlating — drop the event here rather than
+    // buffering it into a chain _push() would only suppress at flush time.
+    if (quietMode.isIndefiniteQuiet()) {
+      logger.info(`[QUIET_MODE] Suppressed (${eventType}) for ${event.deviceName || 'chain escalation'} — ไปพัก`);
+      return;
+    }
+
     if (this.openWindow) {
       this.openWindow.events.push(event);
       logger.info(`[CORRELATOR] Buffered (${eventType}) into open window`);
@@ -920,9 +960,22 @@ class EventCorrelator {
     this.openWindow.events.push(event);
   }
 
+  // Drop an in-progress window without flushing it. Used when ไปพัก starts:
+  // whatever is buffered is pre-ไปพัก activity the user has just declared to
+  // be themselves, and leaving the timer armed would fire a chain escalation
+  // up to a full window later, after the house has gone quiet.
+  _discardWindow() {
+    if (!this.openWindow) return;
+    clearTimeout(this.openWindow.timer);
+    const buffered = this.openWindow.events.length;
+    this.openWindow = null;
+    logger.info(`[CORRELATOR] Discarded open window (${buffered} buffered event(s)) — ไปพัก`);
+  }
+
   _openWindow() {
     this.openWindow = {
       events: [],
+      openedAt: Date.now(),
       timer: setTimeout(() => {
         this._flush().catch((err) => logger.error('[CORRELATOR] Flush failed:', err));
       }, windowMs())
@@ -931,9 +984,22 @@ class EventCorrelator {
 
   async _flush() {
     if (!this.openWindow) return;
-    const { events, timer } = this.openWindow;
+    const { events, timer, openedAt } = this.openWindow;
     clearTimeout(timer);
     this.openWindow = null;
+
+    // ไปพัก started after this window opened, so everything buffered here is
+    // pre-ไปพัก activity the user has since declared to be themselves. Drop
+    // it rather than reporting it late. _discardWindow() already handles the
+    // remote-button path the moment it happens; this covers ไปพัก arriving
+    // as a LINE command, which the correlator never sees — including the
+    // case where a เฝ้าบ้าน has already ended that ไปพัก by the time the
+    // window's timer fires, so the isIndefiniteQuiet() gate in _push() would
+    // no longer catch it.
+    if (quietMode.indefiniteQuietStartedAt() >= openedAt) {
+      logger.info(`[CORRELATOR] Dropped window that spanned a ไปพัก (${events.length} event(s))`);
+      return;
+    }
 
     // events[0] is the opener, already sent standalone above. If nothing
     // followed it, there's nothing more to report.
@@ -958,29 +1024,39 @@ class EventCorrelator {
       eventType: 'CHAIN_ESCALATION',
       lines: lines.join('\n'),
       timestamp: events[events.length - 1].timestamp,
-      // CHAIN_ESCALATION's own eventType isn't itself critical, but if any
-      // consolidated line inside it is, the whole message must still bypass
-      // quiet mode — a real ALARM_ON shouldn't go missing just because it
-      // got folded into a burst with other, routine events.
-      containsCritical: followUps.some((e) => CRITICAL_EVENT_TYPES.has(e.eventType))
+      // Only a real emergency line lets the whole chain through a timed
+      // เงียบๆหน่อย — an ALARM_ON folded into a burst shouldn't go missing.
+      // Anything less (an ALARM_OFF, a mode change) does not, or every
+      // routine door line sharing its window rides out with it.
+      containsEmergency: followUps.some((e) => EMERGENCY_EVENT_TYPES.has(e.eventType))
     });
   }
 
   async _push(event) {
-    // Quiet mode (Increment 3) suppresses only this final push — dedup,
-    // window buffering, and CHAIN_ESCALATION composition above all keep
-    // running exactly as normal, so state stays consistent and nothing
-    // needs to be replayed once the quiet period ends. Critical events
-    // (CRITICAL_EVENT_TYPES above) always bypass this gate — neither a
-    // manual เงียบๆหน่อย nor an automatic ไปพัก-quiet should be able to hide
-    // a real emergency.
-    const isCritical = CRITICAL_EVENT_TYPES.has(event.eventType) || event.containsCritical;
-    if (quietMode.isQuiet() && !isCritical) {
-      logger.info(`[QUIET_MODE] Suppressed (${event.eventType}) push for ${event.deviceName || 'chain escalation'}`);
-      return;
-    }
-    if (quietMode.isQuiet() && isCritical) {
-      logger.info(`[QUIET_MODE] Bypassed for critical event (${event.eventType})`);
+    // Quiet mode suppresses only this final push — dedup, window buffering
+    // and CHAIN_ESCALATION composition above all keep running exactly as
+    // normal, so state stays consistent and nothing needs replaying once the
+    // quiet period ends.
+    //
+    // Two flavours, two rules:
+    //   ไปพัก (indefinite)  — the house is disarmed and you're in it. Send
+    //                         nothing at all except the mode acknowledgement
+    //                         that announced ไปพัก in the first place.
+    //   เงียบๆหน่อย (timed) — the house is still armed, you just want the
+    //                         routine chatter to stop. A genuine emergency
+    //                         (EMERGENCY_EVENT_TYPES) still gets through.
+    if (!MODE_CONFIRMATION_EVENT_TYPES.has(event.eventType) && quietMode.isQuiet()) {
+      const target = event.deviceName || 'chain escalation';
+      if (quietMode.isIndefiniteQuiet()) {
+        logger.info(`[QUIET_MODE] Suppressed (${event.eventType}) push for ${target} — ไปพัก`);
+        return;
+      }
+      const isEmergency = EMERGENCY_EVENT_TYPES.has(event.eventType) || event.containsEmergency;
+      if (!isEmergency) {
+        logger.info(`[QUIET_MODE] Suppressed (${event.eventType}) push for ${target}`);
+        return;
+      }
+      logger.info(`[QUIET_MODE] Bypassed for emergency (${event.eventType})`);
     }
 
     const text = this.templateEngine.render(event);
@@ -1148,9 +1224,21 @@ webhookApp.listen(port, () => {
 // would silently resume mid-quiet-period with no one told. The marker file
 // is only ever deleted through a clean in-process path (manual wake or the
 // timer firing) — its presence here means the previous process died while
-// quiet mode was still active.
+// quiet mode was still active. Read (and consumed) here, but announced only
+// after the houseMode recovery below has decided whether we're still in
+// ไปพัก — see announceRestart().
 const crashedQuietState = quietMode.readCrashMarker();
-if (crashedQuietState) {
+
+// The restart notice, deferred so it can't contradict the recovered state.
+// Skipped entirely when the house comes back up still in ไปพัก: that mode
+// promises silence until เฝ้าบ้าน or กลับบ้าน, and "กลับมาแจ้งเตือนตามปกติ
+// แล้ว" would be false anyway.
+function announceRestart(stillResting) {
+  if (!crashedQuietState) return;
+  if (stillResting) {
+    logger.info('[QUIET_MODE] Restarted while still in ไปพัก — staying quiet, no restart message');
+    return;
+  }
   // Two marker shapes: { indefinite: true } from ไปพัก (no expiry to report)
   // vs { quietUntil, minutes } from a timed เงียบๆหน่อย/-quiet.
   const detail = crashedQuietState.indefinite
@@ -1174,6 +1262,11 @@ dailyReport.start(lineService);
 // startup. Optional — TUYA_ALARM_AUTOMATION_ID depends on a specific
 // automation setup that may not exist/match in every deployment; if unset,
 // houseMode just starts unknown as before.
+//
+// Disarmed also restores quiet mode, not just the display mode: ไปพัก means
+// the bot stays silent until เฝ้าบ้าน or กลับบ้าน, so without this a restart
+// would quietly resume full alerting on a house the user had already put to
+// rest — the one state change nobody asked for.
 const alarmAutomationId = process.env.TUYA_ALARM_AUTOMATION_ID;
 if (alarmAutomationId) {
   tuyaRestClient
@@ -1182,8 +1275,17 @@ if (alarmAutomationId) {
       const mode = rule.status === 'enable' ? 'arm' : 'disarm';
       houseMode.setMode(mode);
       logger.info(`[HOUSE_MODE] Recovered mode at boot from Tuya "Alarm" automation: ${mode}`);
+      if (mode === 'disarm') quietMode.setIndefiniteQuiet();
+      announceRestart(mode === 'disarm');
     })
-    .catch((err) => logger.error('[HOUSE_MODE] Failed to recover mode at boot:', err));
+    .catch((err) => {
+      // Mode unknown — fall back to the pre-recovery behaviour (alerting on,
+      // restart announced) rather than guessing at silence.
+      logger.error('[HOUSE_MODE] Failed to recover mode at boot:', err);
+      announceRestart(false);
+    });
+} else {
+  announceRestart(false);
 }
 
 ```
@@ -3299,6 +3401,12 @@ let quietUntil = null;
 let quietIndefinite = false;
 let wakeTimer = null;
 let durationPromptExpiresAt = null;
+// Date.now() of the most recent ไปพัก. eventCorrelator.js compares it
+// against the moment a correlation window opened, so a window that was
+// already collecting events when ไปพัก started can never flush afterwards —
+// including when ไปพัก arrives by LINE command rather than by the remote,
+// which the correlator has no other way to observe.
+let lastIndefiniteQuietAt = 0;
 
 // How long after prompting for a duration a bare typed number is still
 // understood as the answer — kept short so a coincidental, unrelated number
@@ -3307,6 +3415,22 @@ const DURATION_PROMPT_TTL_MS = 2 * 60 * 1000;
 
 function isQuiet() {
   return quietIndefinite || (quietUntil !== null && Date.now() < quietUntil);
+}
+
+// True only for the ไปพัก (disarm) flavour of quiet, not a timed
+// เงียบๆหน่อย. The two mean different things and eventCorrelator.js treats
+// them differently: ไปพัก is "I'm home, the house is disarmed, tell me
+// nothing at all", so even a siren stays silent; a timed เงียบๆหน่อย is
+// "stop the routine chatter for N minutes" while the house is still armed,
+// so a genuine emergency must still get through.
+function isIndefiniteQuiet() {
+  return quietIndefinite;
+}
+
+// Timestamp of the last ไปพัก, or 0 if there has never been one this
+// process. See lastIndefiniteQuietAt above.
+function indefiniteQuietStartedAt() {
+  return lastIndefiniteQuietAt;
 }
 
 // null means "quiet with no countdown" (indefinite) — distinct from 0
@@ -3367,6 +3491,7 @@ function setIndefiniteQuiet() {
   }
   quietUntil = null;
   quietIndefinite = true;
+  lastIndefiniteQuietAt = Date.now();
   _writeMarker({ indefinite: true });
   logger.info('[QUIET_MODE] Activated indefinitely (ไปพัก)');
 }
@@ -3414,6 +3539,8 @@ function readCrashMarker() {
 
 module.exports = {
   isQuiet,
+  isIndefiniteQuiet,
+  indefiniteQuietStartedAt,
   remainingMinutes,
   setQuiet,
   setIndefiniteQuiet,
@@ -3423,6 +3550,7 @@ module.exports = {
   clearDurationPrompt,
   readCrashMarker
 };
+
 ```
 
 ### 8.17 House Mode (`src/services/houseMode.js`)
@@ -3482,9 +3610,10 @@ interpretation logic to maintain in parallel. A log entry the resolver
 treats as routine (returns `null` — e.g. healthy battery) is dropped from
 history too, same as it would be from a live alert; this keeps ประวัติ
 focused on actual state changes rather than every raw reading. Timestamps
-use `getBangkokHistoryTimestamp()` (Section 8.3, `DD MMM YY HH:mm:ss`) since
-history can span up to the full 7-day retention window, unlike the
-same-burst `CHAIN_ESCALATION` lines that only need `getBangkokTime()`'s bare
+use `getBangkokTimestamp()` (Section 8.3, `DD-MMM-YY HH.mm.ss`) — the same
+single display format as every other LINE message, since history can span up
+to the full 7-day retention window and needs the date, unlike the same-burst
+`CHAIN_ESCALATION` lines that only need `getBangkokTime()`'s bare
 time-of-day.
 
 ```javascript
@@ -3496,7 +3625,7 @@ time-of-day.
 // dropped from history too, same as it would be from a live alert.
 
 const { DP_PROFILES } = require('../config/dpProfiles');
-const { getBangkokHistoryTimestamp } = require('../utils/dateTime');
+const { getBangkokTimestamp } = require('../utils/dateTime');
 
 const EVENT_DISPLAY = {
   DOOR_OPENED: { emoji: '🔓', label: 'เปิด' },
@@ -3531,7 +3660,7 @@ function buildHistoryMessage(device, logEntries) {
 
   const bodyText = lines.length === 0
     ? 'ไม่มีความเคลื่อนไหวล่าสุดครับ'
-    : lines.map((line) => `${getBangkokHistoryTimestamp(new Date(line.time))}  ${line.text}`).join('\n');
+    : lines.map((line) => `${getBangkokTimestamp(new Date(line.time))}  ${line.text}`).join('\n');
 
   return {
     type: 'text',
@@ -3540,6 +3669,7 @@ function buildHistoryMessage(device, logEntries) {
 }
 
 module.exports = { buildHistoryMessage };
+
 ```
 
 ### 8.19 Status Report Aggregator (`src/services/statusReport.js`)
@@ -3641,6 +3771,7 @@ a while) rather than a transient scheduling detail.
 const logger = require('../utils/logger');
 const statusReport = require('./statusReport');
 const reportMode = require('./reportMode');
+const quietMode = require('./quietMode');
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -3679,10 +3810,10 @@ function msUntilNext(hhmm) {
 // in-memory: a restart around the scheduled time just skips that day's
 // report rather than replaying it — same best-effort tier as houseMode.js/
 // quietMode.js's in-memory state, not worth a persistence layer for a daily
-// nicety. Deliberately pushes directly via lineService rather than routing
-// through eventCorrelator, so it always bypasses quiet mode/ไปพัก — a
-// deliberate daily heartbeat shouldn't go missing during a quiet period the
-// same way routine door/motion alerts are meant to.
+// nicety. Pushes directly via lineService rather than routing through
+// eventCorrelator, so a timed เงียบๆหน่อย doesn't swallow it — a deliberate
+// daily heartbeat shouldn't go missing the way routine door/motion alerts
+// are meant to. ไปพัก is the one exception, checked at send time below.
 function start(lineService) {
   const time = process.env.DAILY_REPORT_TIME;
   if (!time) return;
@@ -3706,6 +3837,14 @@ function start(lineService) {
           logger.info('[DAILY_REPORT] Skipped — disabled via /report off');
           return;
         }
+        // ไปพัก means the bot says nothing at all until เฝ้าบ้าน or
+        // กลับบ้าน — the daily heartbeat included. Checked here rather than
+        // at schedule time so a ไปพัก that ends before tomorrow's run
+        // doesn't need anything re-armed.
+        if (quietMode.isIndefiniteQuiet()) {
+          logger.info('[DAILY_REPORT] Skipped — ไปพัก');
+          return;
+        }
         const message = await statusReport.buildReport(lineService);
         await lineService.pushMessage(message);
         logger.info('[DAILY_REPORT] Sent daily summary');
@@ -3723,6 +3862,7 @@ function start(lineService) {
 }
 
 module.exports = { start };
+
 ```
 
 ---
@@ -3961,14 +4101,14 @@ Phase 1 is complete when all of the following hold:
 
 ### Phase 2 Increment 3 (Device History, Quiet Mode, รายงาน)
 
-* Tapping 🕘 ประวัติ on any queryable device's status card (not just controllable ones) shows real recent state changes with correct `DD MMM YY HH:mm:ss` Bangkok timestamps, newest first — verified live against a real device; a device with no recent activity shows "ไม่มีความเคลื่อนไหวล่าสุดครับ", not an error or blank reply.
+* Tapping 🕘 ประวัติ on any queryable device's status card (not just controllable ones) shows real recent state changes with correct `DD-MMM-YY HH.mm.ss` Bangkok timestamps, newest first — verified live against a real device; a device with no recent activity shows "ไม่มีความเคลื่อนไหวล่าสุดครับ", not an error or blank reply.
 * `getDeviceLogs()`'s query-string parameters are alphabetically sorted before both the real request and its HMAC signature — verified live: an unsorted query produced `1004 sign invalid` before the fix, `40000303 Parameter error!` after sorting but before adding the required `type=7` param, and a real device history after both fixes.
 * `เงียบๆหน่อย` → a preset tap or a typed `/quiet N` → an alert-worthy event during that window produces **no** LINE group push (`[QUIET_MODE] Suppressed` in the log, no `[ALERT_SENT]`), and an automatic "กลับมาแล้วครับ ✅" push fires once the timer elapses naturally.
 * `เงียบๆหน่อย` followed by a bare typed number (not a preset tap) produces the identical suppression behavior — confirms the `isDurationPromptPending()` fallback path in `_handleText`.
 * A bare number typed with **no** preceding เงียบๆหน่อย/duration prompt is ignored as plain text, never misread as a quiet-mode duration.
 * `/quiet N` outside 1–1440 gets a range-rejection reply, never a silently-accepted multi-day quiet period.
 * Confirming ไปพัก automatically enters **indefinite** quiet mode (no auto-expiry) and says so in the reply; confirming เฝ้าบ้าน always clears quiet mode (even if a previous ไปพัก/เงียบๆหน่อย left it active) and says so in the reply — verified live via a routine door/motion event staying silent during ไปพัก and resuming after เฝ้าบ้าน or กลับบ้าน.
-* `ALARM_ON`, `ALARM_OFF`, and `WATER_LEAK` always push through regardless of quiet mode (manual or automatic-from-ไปพัก) — verified for both a standalone critical event and one folded into a `CHAIN_ESCALATION` alongside routine events (`containsCritical` flag).
+* `ALARM_ON` and `WATER_LEAK` push through a **timed** `เงียบๆหน่อย` — verified for both a standalone event and one folded into a `CHAIN_ESCALATION` alongside routine events (`containsEmergency` flag). Superseded for ไปพัก by the Increment 6 entry below.
 * Killing and restarting the process while quiet mode is active (timed or indefinite) produces one explicit "ระบบรีสตาร์ท...กลับมาแจ้งเตือนตามปกติแล้ว" push on the next boot, correctly describing whether the prior quiet was timed or indefinite — not silence, and not a duplicate message on a second consecutive restart (the marker file is consumed on read).
 * `รายงาน` (aliases: `/status all`, `สถานะทั้งหมด`) shows a mode summary line above the device table whenever `houseMode.js` has a last-known arm/disarm (via LINE or the physical remote) or quiet mode is active, each clearly labeled as best-effort ("ล่าสุดที่ทราบ") rather than a verified live state; the section is omitted entirely (not shown as "unknown") when neither applies.
 * Status queries, device control, and arm/disarm all continue to work normally while quiet mode (timed or indefinite) is active — only the automatic Tuya-triggered alert push is ever suppressed, never a direct reply to a user-initiated tap.
@@ -3985,6 +4125,16 @@ Phase 1 is complete when all of the following hold:
 * `/switch <role with no token/secret configured>` replies a clear "not configured" message instead of throwing or silently no-op'ing.
 * After a bot is manually invited into the LINE group (post-`/switch`), its groupId is captured automatically from its first event there (verified via a bare `join` event, no message required) and persisted — `lineService.pushMessage()` succeeds afterward with no manual `LINE_${ROLE}_GROUP_ID` entry needed in `.env`.
 * Attempting `lineService.pushMessage()` for a role with no groupId learned yet (e.g. immediately after `/switch` but before the manual invite) throws a clear, specific error rather than silently failing or sending to the wrong group.
+
+### Phase 2 Increment 6 (Display Format, Remote Wording, ไปพัก Total Silence)
+
+* Every LINE message renders its timestamp as `DD-MMM-YY HH.mm.ss` (e.g. `04-Sep-26 10.08.08`) and every `CHAIN_ESCALATION` line as `HH.mm.ss` — one format everywhere, device history included (`getBangkokHistoryTimestamp()` is gone; `historyCard.js` uses `getBangkokTimestamp()`). Verified across all twelve months that the month renders as exactly three letters (`en-GB` emits `Sept` for September, trimmed in `getBangkokDateParts()`) and that midnight renders `00`, never `24`. Log lines keep the sortable `YYYY-MM-DD HH:mm:ss.SSS` format.
+* The physical remote's buttons read as `กดรีโมท ให้ไปพัก` / `กดรีโมท ให้เฝ้าบ้าน` in a `CHAIN_ESCALATION` line, and the standalone confirmation is `กดรีโมท ให้ไปพัก ครับ ผมไปพักก่อนนะครับ 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ` (and its เฝ้าบ้าน counterpart).
+* While ไปพัก is active, **no** bot-initiated message is sent — not a routine door/motion alert, not a `CHAIN_ESCALATION`, not an `ALARM_ON` from the siren re-firing during Tuya's automation-disable propagation, and not the scheduled daily รายงาน (`[DAILY_REPORT] Skipped — ไปพัก`). The only exception is the ไปพัก/เฝ้าบ้าน acknowledgement itself. Replies to a user's own typed command or button tap are unaffected — those answer the user, they aren't notifications.
+* A `REMOTE_DISARMED` never opens or joins a correlation window, and discards any window already open. Replaying the production 2026-09-04 10:08 sequence (`logs/ruck-yom-2026-09-04-1.log`) through the pipeline produces 5 pushes instead of the 7 originally observed, with the stale 10:09:23 `CHAIN_ESCALATION` gone entirely.
+* A window that was open when a ไปพัก began is dropped rather than flushed, including when that ไปพัก arrived as a LINE command and a เฝ้าบ้าน has already ended it before the window's timer fires (`_flush()` compares `openedAt` against `quietMode.indefiniteQuietStartedAt()`).
+* A timed `เงียบๆหน่อย` is unchanged: routine events stay suppressed, `ALARM_ON`/`WATER_LEAK` still push through, and a `CHAIN_ESCALATION` containing only an `ALARM_OFF` plus routine door lines is now correctly suppressed rather than riding out on `ALARM_OFF`'s former critical status.
+* Restarting while the house is disarmed restores **quiet mode**, not just `houseMode`'s display state — `getSceneRule()` reporting `disable` re-enters indefinite quiet at boot, and the "ระบบรีสตาร์ท…กลับมาแจ้งเตือนตามปกติแล้ว" notice is skipped because it would be false. When the automation reads `enable`, or the read fails, the notice fires as before.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

@@ -6,7 +6,7 @@
 // dropped from history too, same as it would be from a live alert.
 
 const { DP_PROFILES } = require('../config/dpProfiles');
-const { getBangkokHistoryTimestamp } = require('../utils/dateTime');
+const { getBangkokTimestamp } = require('../utils/dateTime');
 
 const EVENT_DISPLAY = {
   DOOR_OPENED: { emoji: '🔓', label: 'เปิด' },
@@ -41,7 +41,7 @@ function buildHistoryMessage(device, logEntries) {
 
   const bodyText = lines.length === 0
     ? 'ไม่มีความเคลื่อนไหวล่าสุดครับ'
-    : lines.map((line) => `${getBangkokHistoryTimestamp(new Date(line.time))}  ${line.text}`).join('\n');
+    : lines.map((line) => `${getBangkokTimestamp(new Date(line.time))}  ${line.text}`).join('\n');
 
   return {
     type: 'text',

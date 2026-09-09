@@ -128,9 +128,21 @@ webhookApp.listen(port, () => {
 // would silently resume mid-quiet-period with no one told. The marker file
 // is only ever deleted through a clean in-process path (manual wake or the
 // timer firing) — its presence here means the previous process died while
-// quiet mode was still active.
+// quiet mode was still active. Read (and consumed) here, but announced only
+// after the houseMode recovery below has decided whether we're still in
+// ไปพัก — see announceRestart().
 const crashedQuietState = quietMode.readCrashMarker();
-if (crashedQuietState) {
+
+// The restart notice, deferred so it can't contradict the recovered state.
+// Skipped entirely when the house comes back up still in ไปพัก: that mode
+// promises silence until เฝ้าบ้าน or กลับบ้าน, and "กลับมาแจ้งเตือนตามปกติ
+// แล้ว" would be false anyway.
+function announceRestart(stillResting) {
+  if (!crashedQuietState) return;
+  if (stillResting) {
+    logger.info('[QUIET_MODE] Restarted while still in ไปพัก — staying quiet, no restart message');
+    return;
+  }
   // Two marker shapes: { indefinite: true } from ไปพัก (no expiry to report)
   // vs { quietUntil, minutes } from a timed เงียบๆหน่อย/-quiet.
   const detail = crashedQuietState.indefinite
@@ -154,6 +166,11 @@ dailyReport.start(lineService);
 // startup. Optional — TUYA_ALARM_AUTOMATION_ID depends on a specific
 // automation setup that may not exist/match in every deployment; if unset,
 // houseMode just starts unknown as before.
+//
+// Disarmed also restores quiet mode, not just the display mode: ไปพัก means
+// the bot stays silent until เฝ้าบ้าน or กลับบ้าน, so without this a restart
+// would quietly resume full alerting on a house the user had already put to
+// rest — the one state change nobody asked for.
 const alarmAutomationId = process.env.TUYA_ALARM_AUTOMATION_ID;
 if (alarmAutomationId) {
   tuyaRestClient
@@ -162,6 +179,15 @@ if (alarmAutomationId) {
       const mode = rule.status === 'enable' ? 'arm' : 'disarm';
       houseMode.setMode(mode);
       logger.info(`[HOUSE_MODE] Recovered mode at boot from Tuya "Alarm" automation: ${mode}`);
+      if (mode === 'disarm') quietMode.setIndefiniteQuiet();
+      announceRestart(mode === 'disarm');
     })
-    .catch((err) => logger.error('[HOUSE_MODE] Failed to recover mode at boot:', err));
+    .catch((err) => {
+      // Mode unknown — fall back to the pre-recovery behaviour (alerting on,
+      // restart announced) rather than guessing at silence.
+      logger.error('[HOUSE_MODE] Failed to recover mode at boot:', err);
+      announceRestart(false);
+    });
+} else {
+  announceRestart(false);
 }
