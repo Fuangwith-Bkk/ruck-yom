@@ -116,6 +116,15 @@ async function getDeviceStatus(deviceId) {
   return request('GET', `/v1.0/devices/${deviceId}/status`, { accessToken });
 }
 
+// Device detail — name, category, and the `online` flag deviceHealth.js
+// watches (the same flag behind the Smart Life app's "Device Offline
+// Notification"). Unlike getDeviceStatus above, this works for gateways,
+// which have no DPs of their own.
+async function getDeviceInfo(deviceId) {
+  const accessToken = await getAccessToken();
+  return request('GET', `/v1.0/devices/${deviceId}`, { accessToken });
+}
+
 // commands: [{ code, value }, ...] — e.g. [{ code: 'alarm_switch', value: true }].
 async function sendCommand(deviceId, commands) {
   const accessToken = await getAccessToken();
@@ -189,4 +198,4 @@ async function getDeviceLogs(deviceId, { startTime, endTime, size = 10 } = {}) {
   return request('GET', `/v1.0/devices/${deviceId}/logs?${sortedQuery}`, { accessToken });
 }
 
-module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getSceneRule, getDeviceLogs };
+module.exports = { getAccessToken, getDeviceStatus, getDeviceInfo, sendCommand, triggerScene, getSceneRule, getDeviceLogs };

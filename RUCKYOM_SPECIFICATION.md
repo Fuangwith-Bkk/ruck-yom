@@ -42,7 +42,7 @@
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 2: Interactive Status Query & Device Control (Increments 1-3 shipped)     │
+│ PHASE 2: Interactive Status Query & Device Control (Increments 1-7 shipped)     │
 │ • Express `/webhook` server receiving LINE chat events, signature-verified      │
 │ • Tap-only device menus (Quick Reply/Flex) — never requires typing a device     │
 │   name/ID; argument-less commands (`/status`, `เมนู`) are shortcuts into the     │
@@ -69,6 +69,10 @@
 │   that Tuya automation's enable/disable status at startup and seeds houseMode   │
 │   from it, instead of starting every restart with an unknown mode (Section 8.9, │
 │   8.13's getSceneRule)                                                          │
+│ • Gateway offline/online alerts — Tuya REST polling of the `online` flag,     │
+│   bypassing quiet mode (deviceHealth.js, Section 8.23)                          │
+│ • LINE quota warning — checked after every push, suggests /switch at 280/300  │
+│   (quotaWatch.js, Section 8.24)                                                 │
 │ • Not yet built: breaker timer preset                                           │
 └─────────────────────────┬───────────────────────────────────────────────────────┘
                           │
@@ -227,6 +231,12 @@ BATTERY_LOW_THRESHOLD=20                       # [Phase 2, Increment 5] battery_
 DAILY_REPORT_TIME=08:00                        # HH:mm, in TIMEZONE. Pushes รายงาน (device status + houseMode/quietMode + LINE quota) once a day, bypassing quiet mode (Section 8.20). Optional — disabled if unset.
 REPORT_STATE_FILE=./report-state.json          # [Phase 2, Increment 5] Existence-only marker persisting whether the daily รายงาน push is currently disabled via /report off (ปิดรายงาน) — Section 8.21. Optional, defaults to ./report-state.json.
 
+# Gateway Offline Alerts
+DEVICE_ONLINE_CHECK_INTERVAL_SEC=120           # [Phase 2, Increment 7] How often (s) to poll Tuya's `online` flag for each watched device — category "gateway" by default, overridable per registry entry with "watchOnline" (Section 8.23). One Tuya API call per watched device per check. Optional, defaults to 120.
+
+# LINE Quota Warning
+LINE_QUOTA_WARN_AT=280                         # [Phase 2, Increment 7] Checked after every push: once the active bot has used this many push messages this month, warn once and suggest /switch (Section 8.24). Held back during ไปพัก. Optional, defaults to 280.
+
 # Quiet Mode (เงียบๆหน่อย)
 QUIET_STATE_FILE=./quiet-state.json            # Crash-recovery marker file (existence-only signal, not real state persistence). Optional, defaults to ./quiet-state.json.
 
@@ -258,7 +268,7 @@ ruck-yom/
 │   ├── config/
 │   │   ├── environment.js              # Boot validation for required env vars
 │   │   ├── deviceRegistry.js           # Loads deviceRegistry.json
-│   │   ├── deviceRegistry.json         # Actual device_id -> {name, category, dpProfile} map (Untracked — real device IDs, like .env)
+│   │   ├── deviceRegistry.json         # Actual device_id -> {name, category, dpProfile, watchOnline?} map (Untracked — real device IDs, like .env)
 │   │   ├── deviceRegistry.example.json # Template committed to Git (shape reference, no real device IDs)
 │   │   ├── dpProfiles.js               # [Phase 2] Per-Tuya-category DP code -> event resolver table, keyed by dpProfile
 │   │   └── deviceCategories.js         # [Phase 2] User-facing category -> {label, emoji, menu/action flags} table
@@ -283,7 +293,9 @@ ruck-yom/
 │   │   ├── statusReport.js         # [Phase 2, Increment 4] Shared รายงาน builder (device status + houseMode/quietMode + LINE quota) — used by both the manual command and the daily push; see Section 8.19
 │   │   ├── dailyReport.js          # [Phase 2, Increment 4] Optional once-daily automatic รายงาน push (DAILY_REPORT_TIME), gated by reportMode.js; see Section 8.20
 │   │   ├── reportMode.js           # [Phase 2, Increment 5] Persisted on/off toggle for the daily รายงาน push (/report off|on, ปิดรายงาน/เปิดรายงาน); see Section 8.21
-│   │   └── botIdentity.js          # [Phase 2, Increment 5] Role-based LINE credential set (dev/prod/dr) + active-role/learned-groupId persistence, driving /switch dr|prod; see Section 8.22
+│   │   ├── botIdentity.js          # [Phase 2, Increment 5] Role-based LINE credential set (dev/prod/dr) + active-role/learned-groupId persistence, driving /switch dr|prod; see Section 8.22
+│   │   ├── deviceHealth.js         # [Phase 2, Increment 7] Gateway online/offline watchdog (Tuya REST polling), bypasses quiet mode; see Section 8.23
+│   │   └── quotaWatch.js           # [Phase 2, Increment 7] LINE push-quota warning, checked after every push, suggests /switch; see Section 8.24
 │   ├── templates/
 │   │   ├── securityAlerts.json     # Localized Thai alert message templates (Phase 1)
 │   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm/quiet), dynamic, not static JSON
@@ -365,6 +377,8 @@ Every event also carries a short `time` field (`HH.mm.ss`, Bangkok) alongside th
   "BATTERY_LOW": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} แบตใกล้หมดแล้ว เหลือ {{batteryLevel}}% เอง กลัวมันหมดแล้วเฝ้าบ้านไม่ได้ครับ ช่วยไปเปลี่ยนแบตให้หน่อยนะครับ\n{{timestamp}}",
   "REMOTE_ARMED": "กดรีโมท ให้เฝ้าบ้าน ครับ ผมเฝ้าบ้านให้นะครับ แจ้งเตือนตามปกติครับ\n{{timestamp}}",
   "REMOTE_DISARMED": "กดรีโมท ให้ไปพัก ครับ ผมไปพักก่อนนะครับ 🤫 จะไม่แจ้งเตือนจนกว่าจะเฝ้าบ้านหรือกลับบ้านนะครับ\n{{timestamp}}",
+  "DEVICE_OFFLINE": "{{botName}} วิ่งมาบอกครับ! {{deviceName}} ออฟไลน์ไปแล้วครับ ตอนนี้เซนเซอร์ที่ต่อกับมันแจ้งเตือนไม่ได้นะครับ ช่วยไปดูไฟกับเน็ตของมันหน่อยนะครับ\n{{timestamp}}",
+  "DEVICE_ONLINE": "{{deviceName}} กลับมาออนไลน์แล้วครับ (ออฟไลน์ไป {{downtime}})\n{{timestamp}}",
   "UNKNOWN_EVENT": "{{botName}} ได้รับแจ้งว่า\nอุปกรณ์ {{deviceName}}\nตรวจพบว่า {{rawPayload}}\nช่วย {{botName}} ดูหน่อยนะครับ\n{{timestamp}}",
   "CHAIN_ESCALATION": "{{botName}}วิ่งมาบอกครับ! มีเหตุการณ์ต่อเนื่องเกิดขึ้นครับ:\n{{lines}}\n{{timestamp}}"
 }
@@ -697,6 +711,7 @@ signature matched that same active role's secret, so "active role" and
 ```javascript
 const { messagingApi } = require('@line/bot-sdk');
 const botIdentity = require('./botIdentity');
+const quotaWatch = require('./quotaWatch');
 
 class LineMessagingService {
   constructor() {
@@ -743,6 +758,11 @@ class LineMessagingService {
       to: groupId,
       messages
     });
+
+    // Every push spends quota, so this is the one place a "nearly out"
+    // warning can become due — fire-and-forget so the caller never waits on
+    // LINE's quota API. See quotaWatch.js.
+    quotaWatch.checkAfterPush(this);
   }
 
   // LINE's monthly push-message quota + how much of it has been used so
@@ -1111,6 +1131,7 @@ const { createWebhookServer } = require('./webhook/server');
 const quietMode = require('./services/quietMode');
 const houseMode = require('./services/houseMode');
 const dailyReport = require('./services/dailyReport');
+const deviceHealth = require('./services/deviceHealth');
 const tuyaRestClient = require('./services/tuyaRestClient');
 const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
@@ -1252,6 +1273,9 @@ function announceRestart(stillResting) {
 // Optional daily รายงาน push (DAILY_REPORT_TIME) — no-ops if unset. See
 // dailyReport.js for scheduling details.
 dailyReport.start(lineService);
+
+// Gateway online/offline alerts (Tuya REST polling) — see deviceHealth.js.
+deviceHealth.start(templateEngine, lineService);
 
 // Boot-time houseMode recovery: without this, every restart starts รายงาน's
 // mode line as unknown until the next LINE command or remote button press,
@@ -2535,6 +2559,16 @@ async function getDeviceStatus(deviceId) {
   return request('GET', `/v1.0/devices/${deviceId}/status`, { accessToken });
 }
 
+// Device detail — name, category, and the `online` flag deviceHealth.js
+// watches (the same flag behind the Smart Life app's "Device Offline
+// Notification"). Unlike getDeviceStatus above, this works for gateways,
+// which have no DPs of their own.
+async function getDeviceInfo(deviceId) {
+  const accessToken = await getAccessToken();
+  return request('GET', `/v1.0/devices/${deviceId}`, { accessToken });
+}
+
+
 // commands: [{ code, value }, ...] — e.g. [{ code: 'alarm_switch', value: true }].
 async function sendCommand(deviceId, commands) {
   const accessToken = await getAccessToken();
@@ -2608,7 +2642,7 @@ async function getDeviceLogs(deviceId, { startTime, endTime, size = 10 } = {}) {
   return request('GET', `/v1.0/devices/${deviceId}/logs?${sortedQuery}`, { accessToken });
 }
 
-module.exports = { getAccessToken, getDeviceStatus, sendCommand, triggerScene, getSceneRule, getDeviceLogs };
+module.exports = { getAccessToken, getDeviceStatus, getDeviceInfo, sendCommand, triggerScene, getSceneRule, getDeviceLogs };
 ```
 
 **Increment 3 note on the Device Log endpoint's quirks**, both discovered
@@ -4045,6 +4079,255 @@ module.exports = {
 };
 ```
 
+### 8.23 Gateway Offline Alerts (`src/services/deviceHealth.js`)
+
+[Phase 2, Increment 7] Added after the 2026-09-22 outage
+(`logs/ruck-yom-2026-09-22-1.log`): the "ครหวัน Zigbee LAN GW" gateway went
+offline, the Smart Life app raised a "Device Offline Notification" at
+15:22:03, and ruck-yom logged nothing between 14:49:00 and 15:45:07 — then
+received three stale motion-sensor DPs (device timestamps 15:00:19–15:09:58,
+UUID-style `dataId`s) flushed together on reconnect. Pulsar never delivered
+an online/offline event for it; this deployment only receives protocol-4 DP
+reports. So the watchdog polls Tuya's REST device detail (`getDeviceInfo()`,
+Section 8.13) for the same `online` flag the Smart Life alert is based on.
+
+Watched devices default to `category: "gateway"`; a `deviceRegistry.json`
+entry can override with `"watchOnline": false` (e.g. this deployment's
+unplugged spare "Zigbee Gateway (Local)") or `true`. Both the offline and the
+back-online message (with downtime) bypass **both** quiet modes — the one
+deliberate exception to ไปพัก's total silence, since a dead gateway blinds
+every sensor behind it. Poll interval: `DEVICE_ONLINE_CHECK_INTERVAL_SEC`
+(default 120 — about 21,600 Tuya API calls/month per watched device).
+
+```javascript
+const logger = require('../utils/logger');
+const deviceRegistry = require('../config/deviceRegistry');
+const tuyaRestClient = require('./tuyaRestClient');
+const { getBangkokTimestamp } = require('../utils/dateTime');
+
+// Gateway online/offline watchdog. Polls Tuya's REST device detail rather
+// than listening on Pulsar: on 2026-09-22 the "ครหวัน Zigbee LAN GW" gateway
+// went offline (the Smart Life app alerted at 15:22:03) and Pulsar delivered
+// nothing at all — no online/offline bizCode events reach this app, only
+// protocol-4 DP reports. Tuya's own `online` flag is what the Smart Life
+// app's alert is based on, so reading it directly matches that alert without
+// depending on any Message Service subscription setting.
+//
+// Gateways only (category "gateway") by default: when a gateway drops, every
+// Zigbee sensor behind it goes blind, so its one alert is the one that
+// matters — watching every sensor would turn a single outage into a flood,
+// and sleepy battery sensors flap on their own. A registry entry can opt
+// out with `"watchOnline": false` (e.g. a spare/test gateway that is
+// unplugged on purpose) or opt in any other device with `"watchOnline": true`.
+//
+// Deliberately bypasses quiet mode — both timed เงียบๆหน่อย and ไปพัก. A
+// dead gateway means the alarm system itself can't see anything, which is
+// exactly what someone resting at home still needs to know; it's rare, not
+// routine chatter. Pushes straight through lineService (same as
+// dailyReport.js) rather than eventCorrelator, so it's never buffered into a
+// chain escalation either.
+//
+// In-memory state only: a restart forgets which devices were already known
+// offline, so a gateway still offline at boot is announced again once —
+// accepted, since "the gateway is down" is worth repeating after a restart.
+
+const intervalMs = () => (Number(process.env.DEVICE_ONLINE_CHECK_INTERVAL_SEC) || 120) * 1000;
+
+// deviceId -> { online: boolean, offlineSince: number|null }
+const state = new Map();
+
+function watchedDevices() {
+  return Object.entries(deviceRegistry)
+    .filter(([, device]) => device.watchOnline ?? device.category === 'gateway')
+    .map(([deviceId, device]) => ({ deviceId, name: device.name }));
+}
+
+// "23 นาที" / "1 ชั่วโมง 5 นาที" — rounded to whole minutes; the poll
+// interval already makes anything finer meaningless.
+function formatDowntime(ms) {
+  const totalMinutes = Math.max(1, Math.round(ms / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${minutes} นาที`;
+  return minutes === 0 ? `${hours} ชั่วโมง` : `${hours} ชั่วโมง ${minutes} นาที`;
+}
+
+async function checkDevice({ deviceId, name }, templateEngine, lineService) {
+  let info;
+  try {
+    info = await tuyaRestClient.getDeviceInfo(deviceId);
+  } catch (err) {
+    // Can't tell — leave the known state alone rather than guessing. If this
+    // host's own internet is down, LINE is unreachable anyway.
+    logger.error(`[DEVICE_HEALTH] Failed to check ${name}:`, err);
+    return;
+  }
+
+  const online = info.online === true;
+  const previous = state.get(deviceId);
+  const now = Date.now();
+
+  // First reading: an online device just sets the baseline silently; one
+  // already offline is announced, since nobody has been told yet.
+  if (!previous) {
+    state.set(deviceId, { online, offlineSince: online ? null : now });
+    logger.info(`[DEVICE_HEALTH] ${name} baseline: ${online ? 'online' : 'offline'}`);
+    if (online) return;
+  } else if (previous.online === online) {
+    return;
+  } else {
+    state.set(deviceId, { online, offlineSince: online ? null : now });
+  }
+
+  const event = online
+    ? {
+        eventType: 'DEVICE_ONLINE',
+        deviceName: name,
+        downtime: formatDowntime(now - previous.offlineSince),
+        timestamp: getBangkokTimestamp(new Date(now))
+      }
+    : { eventType: 'DEVICE_OFFLINE', deviceName: name, timestamp: getBangkokTimestamp(new Date(now)) };
+
+  logger.info(`[DEVICE_HEALTH] ${name} is now ${online ? 'online' : 'offline'}`);
+  try {
+    await lineService.pushMessage(templateEngine.render(event));
+    logger.info(`[ALERT_SENT] (${event.eventType}) Delivered notification for ${name}`);
+  } catch (err) {
+    logger.error(`[DEVICE_HEALTH] Failed to send ${event.eventType} for ${name}:`, err);
+  }
+}
+
+function start(templateEngine, lineService) {
+  const devices = watchedDevices();
+  if (devices.length === 0) {
+    logger.info('[DEVICE_HEALTH] No devices to watch — online/offline alerts disabled');
+    return;
+  }
+  logger.info(
+    `[DEVICE_HEALTH] Watching ${devices.map((d) => d.name).join(', ')} every ${intervalMs() / 1000}s`
+  );
+
+  // setTimeout chain rather than setInterval, so a slow Tuya response can
+  // never stack overlapping checks.
+  const tick = async () => {
+    for (const device of devices) {
+      await checkDevice(device, templateEngine, lineService);
+    }
+    setTimeout(tick, intervalMs());
+  };
+  tick();
+}
+
+module.exports = { start };
+```
+
+### 8.24 LINE Quota Warning (`src/services/quotaWatch.js`)
+
+[Phase 2, Increment 7] Each LINE bot (prod/dr) has its own monthly push quota
+(300 on the free plan); once spent, every push fails with 429 and the bot
+can't even say so. `lineMessaging.js`'s `pushMessage()` (Section 8.7) calls
+`checkAfterPush()` fire-and-forget after every successful push — there's no
+timer, since usage only grows when something is pushed. At
+`LINE_QUOTA_WARN_AT` messages used (default 280) it pushes one warning per
+bot per month suggesting `/switch` to the other configured bot (Section
+8.22) — it never switches by itself, since the bots' group membership still
+has to be swapped by hand in the LINE app. Held back during ไปพัก; the first
+push after ไปพัก ends re-checks and delivers it.
+
+```javascript
+const logger = require('../utils/logger');
+const botIdentity = require('./botIdentity');
+const quietMode = require('./quietMode');
+
+// Warns the group once the active LINE bot's monthly push quota is nearly
+// spent, and says which bot to /switch to — once it's actually used up,
+// every alert silently fails (LINE rejects the push with 429), and by then
+// the bot can't even say so. Only warns; never switches by itself, since
+// the switch also needs a human to swap the bots' group membership in the
+// LINE app (LINE allows only one bot per group — see botIdentity.js).
+//
+// Checked right after every successful push (lineMessaging.js), not on a
+// timer: usage only ever grows when something is pushed, so with no pushes
+// there's nothing new to check. replyMessage doesn't count against the
+// quota, so it doesn't trigger a check. getQuota() is two lightweight GETs
+// against LINE's own API and isn't counted against the push quota either.
+//
+// Held back during ไปพัก (total silence): the check just doesn't warn, and
+// the first push after ไปพัก ends re-checks and delivers it. A quota running
+// low is a "switch bots soon" chore, not an emergency like a gateway going
+// offline (deviceHealth.js).
+//
+// In-memory "already warned" memory, keyed by role + month: a restart may
+// repeat the warning once, which is harmless.
+
+// Absolute message count, not a percentage — the free plan's 300/month is
+// what this deployment runs on, and 280 leaves room for the warning itself
+// plus a switch confirmation.
+const warnAt = () => Number(process.env.LINE_QUOTA_WARN_AT) || 280;
+
+const warned = new Set();
+let checking = false;
+
+function monthKey(role) {
+  const month = new Intl.DateTimeFormat('en-CA', {
+    timeZone: process.env.TIMEZONE || 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit'
+  }).format(new Date());
+  return `${role}:${month}`;
+}
+
+function buildWarning(role, used, limit) {
+  const header = `⚠️ โควต้าส่งข้อความ LINE ของ bot-${role} เดือนนี้ใกล้หมดแล้วครับ ใช้ไป ${used}/${limit}`;
+  const others = botIdentity.SWITCHABLE_ROLES.filter((r) => r !== role && botIdentity.isConfigured(r));
+  if (others.length === 0) {
+    return `${header}\nถ้าหมดแล้วผมจะแจ้งเตือนไม่ได้จนถึงเดือนหน้านะครับ`;
+  }
+  const target = others[0];
+  return (
+    `${header}\nถ้าหมดแล้วผมจะแจ้งเตือนไม่ได้นะครับ ` +
+    `แนะนำให้พิมพ์ /switch ${target} แล้วเอา bot-${role} ออกจากกลุ่ม เชิญ bot-${target} เข้ากลุ่มแทนครับ`
+  );
+}
+
+// Called (not awaited) by lineMessaging.js after each successful push.
+// `checking` stops a burst of pushes from firing overlapping checks that
+// could each send the warning; the warning's own push lands here too and
+// returns early because the month is already marked warned.
+async function checkAfterPush(lineService) {
+  const role = botIdentity.getActiveRole();
+  const key = monthKey(role);
+  if (checking || warned.has(key) || quietMode.isIndefiniteQuiet()) return;
+
+  checking = true;
+  try {
+    const { quota, consumption } = await lineService.getQuota();
+    // type 'none' = unlimited plan, nothing to run out of.
+    if (quota?.type !== 'limited' || typeof quota.value !== 'number') return;
+
+    const used = consumption?.totalUsage ?? 0;
+    logger.debug(`[QUOTA_WATCH] bot-${role}: ${used}/${quota.value}`);
+    if (used < warnAt()) return;
+
+    warned.add(key);
+    try {
+      await lineService.pushMessage(buildWarning(role, used, quota.value));
+      logger.info(`[ALERT_SENT] (LINE_QUOTA_LOW) bot-${role} at ${used}/${quota.value}`);
+    } catch (err) {
+      // Let the next push retry the warning.
+      warned.delete(key);
+      throw err;
+    }
+  } catch (err) {
+    logger.error('[QUOTA_WATCH] Quota check failed:', err);
+  } finally {
+    checking = false;
+  }
+}
+
+module.exports = { checkAfterPush };
+```
+
 ---
 
 ## 9. Definition of Done
@@ -4135,6 +4418,14 @@ Phase 1 is complete when all of the following hold:
 * A window that was open when a ไปพัก began is dropped rather than flushed, including when that ไปพัก arrived as a LINE command and a เฝ้าบ้าน has already ended it before the window's timer fires (`_flush()` compares `openedAt` against `quietMode.indefiniteQuietStartedAt()`).
 * A timed `เงียบๆหน่อย` is unchanged: routine events stay suppressed, `ALARM_ON`/`WATER_LEAK` still push through, and a `CHAIN_ESCALATION` containing only an `ALARM_OFF` plus routine door lines is now correctly suppressed rather than riding out on `ALARM_OFF`'s former critical status.
 * Restarting while the house is disarmed restores **quiet mode**, not just `houseMode`'s display state — `getSceneRule()` reporting `disable` re-enters indefinite quiet at boot, and the "ระบบรีสตาร์ท…กลับมาแจ้งเตือนตามปกติแล้ว" notice is skipped because it would be false. When the automation reads `enable`, or the read fails, the notice fires as before.
+
+### Phase 2 Increment 7 (Gateway Offline Alerts, LINE Quota Warning)
+
+* A watched gateway going offline (Tuya's `online` flag turning false) produces one `DEVICE_OFFLINE` push within `DEVICE_ONLINE_CHECK_INTERVAL_SEC` of Tuya marking it, and coming back produces one `DEVICE_ONLINE` push with the downtime (`ออฟไลน์ไป 23 นาที`). Both are delivered during ไปพัก and timed เงียบๆหน่อย.
+* A watched gateway already offline at boot is announced once; an online one sets its baseline silently. A registry entry with `"watchOnline": false` is never polled.
+* A failed Tuya poll leaves the known state unchanged — no false offline alert from a REST error.
+* After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
+* During ไปพัก the quota warning is held back and delivered by the first push after ไปพัก ends.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

@@ -15,6 +15,7 @@ const { createWebhookServer } = require('./webhook/server');
 const quietMode = require('./services/quietMode');
 const houseMode = require('./services/houseMode');
 const dailyReport = require('./services/dailyReport');
+const deviceHealth = require('./services/deviceHealth');
 const tuyaRestClient = require('./services/tuyaRestClient');
 const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
@@ -156,6 +157,9 @@ function announceRestart(stillResting) {
 // Optional daily รายงาน push (DAILY_REPORT_TIME) — no-ops if unset. See
 // dailyReport.js for scheduling details.
 dailyReport.start(lineService);
+
+// Gateway online/offline alerts (Tuya REST polling) — see deviceHealth.js.
+deviceHealth.start(templateEngine, lineService);
 
 // Boot-time houseMode recovery: without this, every restart starts รายงาน's
 // mode line as unknown until the next LINE command or remote button press,

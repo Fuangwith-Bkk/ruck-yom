@@ -1,5 +1,6 @@
 const { messagingApi } = require('@line/bot-sdk');
 const botIdentity = require('./botIdentity');
+const quotaWatch = require('./quotaWatch');
 
 class LineMessagingService {
   constructor() {
@@ -46,6 +47,11 @@ class LineMessagingService {
       to: groupId,
       messages
     });
+
+    // Every push spends quota, so this is the one place a "nearly out"
+    // warning can become due — fire-and-forget so the caller never waits on
+    // LINE's quota API. See quotaWatch.js.
+    quotaWatch.checkAfterPush(this);
   }
 
   // LINE's monthly push-message quota + how much of it has been used so

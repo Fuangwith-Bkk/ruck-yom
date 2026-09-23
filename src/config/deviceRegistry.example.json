@@ -1,5 +1,7 @@
 {
   "eb0000000000000000abcd": { "name": "ประตูหน้าบ้าน", "category": "door", "dpProfile": "mcs" },
   "eb0000000000000000efgh": { "name": "หลอดไฟยาวหน้าบ้าน", "category": "relay", "dpProfile": "tdq" },
-  "eb0000000000000000ijkl": { "name": "Alarm", "category": "alarm", "dpProfile": "sgbj" }
+  "eb0000000000000000ijkl": { "name": "Alarm", "category": "alarm", "dpProfile": "sgbj" },
+  "eb0000000000000000mnop": { "name": "Gateway", "category": "gateway", "dpProfile": null },
+  "eb0000000000000000qrst": { "name": "Spare Gateway", "category": "gateway", "dpProfile": null, "watchOnline": false }
 }

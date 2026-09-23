@@ -3,6 +3,15 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.6.0] - 2026-09-23
+
+### Added
+- **Gateway offline/online alerts** (new `src/services/deviceHealth.js`) — on 2026-09-22 the "ครหวัน Zigbee LAN GW" gateway went offline (the Smart Life app alerted at 15:22:03) and ruck-yom said nothing: Pulsar delivered no online/offline event, the log went silent 14:49:00–15:45:07, and three stale motion DPs were flushed together on reconnect. ruck-yom now polls Tuya's `online` flag (new `tuyaRestClient.getDeviceInfo()`, `GET /v1.0/devices/{device_id}`) every `DEVICE_ONLINE_CHECK_INTERVAL_SEC` (default 120) and pushes `DEVICE_OFFLINE`, then `DEVICE_ONLINE` with the downtime (`ออฟไลน์ไป 23 นาที`). Watches `category: "gateway"` devices by default; `"watchOnline": false`/`true` in `deviceRegistry.json` overrides per device. Both messages bypass **both** quiet modes — the one deliberate exception to ไปพัก's total silence, since a dead gateway blinds every sensor behind it.
+- **LINE quota warning** (new `src/services/quotaWatch.js`) — after every successful push, `lineMessaging.js` checks the active bot's monthly usage; at `LINE_QUOTA_WARN_AT` (default 280, of the free plan's 300) it sends one warning per bot per month suggesting `/switch` to the other configured bot. Never switches by itself (LINE group membership still has to be swapped by hand). No timer — no pushes means nothing to check. Held back during ไปพัก, delivered by the first push after it ends.
+
+### Upgrade notes
+- Add `"watchOnline": false` to any gateway in the server's `deviceRegistry.json` that is intentionally offline (untracked file — not updated by the pull), or it will alert at every restart.
+
 ## [2.5.0] - 2026-09-09
 
 ### Changed
