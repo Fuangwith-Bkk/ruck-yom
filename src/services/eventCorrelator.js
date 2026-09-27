@@ -102,9 +102,14 @@ class EventCorrelator {
       return;
     }
 
-    await this._push(event);
+    // Open the window before awaiting the push, not after: the LINE call
+    // takes ~400ms, and anything arriving meanwhile used to find no window,
+    // push standalone and open a window of its own — on 2026-09-27 a door,
+    // a siren-settings echo and ALARM_ON 0.4s apart went out as three
+    // separate pushes, each overwriting the last one's window.
     this._openWindow();
     this.openWindow.events.push(event);
+    await this._push(event);
   }
 
   // Drop an in-progress window without flushing it. Used when ไปพัก starts:

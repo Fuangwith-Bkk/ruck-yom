@@ -25,6 +25,10 @@
 
 const isTrue = (value) => value === true || value === 'true';
 
+// A DP that's known and never alert-worthy — e.g. a settings echo — so it
+// stays silent instead of falling through to UNKNOWN_EVENT.
+const ignore = () => null;
+
 // Re-read on every call (not cached at module load) so BATTERY_LOW_THRESHOLD
 // can be tuned in .env without a code change — same pattern as
 // eventCorrelator.js's windowMs(). Falls back to the original hardcoded 20%.
@@ -85,9 +89,14 @@ const DP_PROFILES = {
   tdq: {
     switch_1: relayState
   },
-  // Siren.
+  // Siren. The "Alarm" automation writes alarm_volume and alarm_time
+  // before alarm_switch, and the siren echoes each one back — on
+  // 2026-09-27 the alarm_time echo (380) reached LINE as a raw
+  // UNKNOWN_EVENT right before ALARM_ON. They're settings, not events.
   sgbj: {
-    alarm_switch: alarmState
+    alarm_switch: alarmState,
+    alarm_volume: ignore,
+    alarm_time: ignore
   },
   // Motion Detector.
   pir: {
