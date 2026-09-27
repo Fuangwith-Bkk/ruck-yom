@@ -31,5 +31,8 @@ quiet-state.json
 # Daily รายงาน disabled marker (runtime state, not app code)
 report-state.json
 
+# One-time low-battery alert state (runtime state, not app code)
+battery-alert-state.json
+
 # Active bot role (dev/prod/dr) + learned groupIds (runtime state, not app code)
 line-role-state.json

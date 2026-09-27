@@ -16,6 +16,7 @@ const quietMode = require('./services/quietMode');
 const houseMode = require('./services/houseMode');
 const dailyReport = require('./services/dailyReport');
 const deviceHealth = require('./services/deviceHealth');
+const batteryAlerts = require('./services/batteryAlerts');
 const tuyaRestClient = require('./services/tuyaRestClient');
 const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
@@ -69,6 +70,9 @@ client.message(async (ws, message) => {
     // than the SDK's own [SDK:INFO] dumps, which include the base64/crypto
     // envelope. debug-only since this is per-message volume.
     logger.debug('[TUYA_IN]', rawData);
+    // Re-arm a device's low-battery alerts once it reports healthy
+    // again (battery replaced) — see batteryAlerts.js.
+    batteryAlerts.observe(rawData);
     const events = normalizer.transform(rawData);
     if (!events) return;
 
@@ -77,6 +81,12 @@ client.message(async (ws, message) => {
     // consolidation window, or flush a consolidated message — see
     // Section 8.8.
     for (const event of events) {
+      // Low battery isn't critical: one push below the low threshold, one
+      // more below the critical threshold, until it's replaced.
+      if (event.eventType === 'BATTERY_LOW' && !batteryAlerts.shouldAlert(event, quietMode.isQuiet())) {
+        continue;
+      }
+
       // Physical Security Remote Control arm/disarm buttons (dpProfiles.js's
       // `sos` profile) are the hardware-side counterpart to interactionRouter
       // .js's _executeArmDisarm — same houseMode/quietMode side effects,
