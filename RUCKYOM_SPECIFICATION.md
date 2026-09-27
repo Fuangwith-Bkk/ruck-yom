@@ -73,6 +73,8 @@
 │   bypassing quiet mode (deviceHealth.js, Section 8.23)                          │
 │ • LINE quota warning — checked after every push, suggests /switch at 280/300  │
 │   (quotaWatch.js, Section 8.24)                                                 │
+│ • Battery alert limit — BATTERY_LOW sent once below 20%, once more below 5%,  │
+│   then silent until the battery is replaced (batteryAlerts.js, Section 8.25)    │
 │ • Not yet built: breaker timer preset                                           │
 └─────────────────────────┬───────────────────────────────────────────────────────┘
                           │
@@ -174,6 +176,9 @@ quiet-state.json
 # Daily รายงาน disabled marker (runtime state, not app code)
 report-state.json
 
+# One-time low-battery alert state (runtime state, not app code)
+battery-alert-state.json
+
 # Active bot role (dev/prod/dr) + learned groupIds (runtime state, not app code)
 line-role-state.json
 
@@ -226,6 +231,8 @@ EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidati
 
 # Battery Alerts
 BATTERY_LOW_THRESHOLD=20                       # [Phase 2, Increment 5] battery_percentage/battery DP value (%) below which a device triggers BATTERY_LOW (Section 8.11's batteryLow()). Optional, defaults to 20.
+BATTERY_CRITICAL_THRESHOLD=5                   # [v2.6.1] Battery % below which a device that already got its BATTERY_LOW alert gets one last one (Section 8.25). Optional, defaults to 5.
+BATTERY_STATE_FILE=./battery-alert-state.json  # [v2.6.1] Which devices already got their low/critical battery alert ({ deviceId: "low" | "critical" }) — survives restarts (Section 8.25). Optional, defaults to ./battery-alert-state.json.
 
 # Daily Summary
 DAILY_REPORT_TIME=08:00                        # HH:mm, in TIMEZONE. Pushes รายงาน (device status + houseMode/quietMode + LINE quota) once a day, bypassing quiet mode (Section 8.20). Optional — disabled if unset.
@@ -295,7 +302,8 @@ ruck-yom/
 │   │   ├── reportMode.js           # [Phase 2, Increment 5] Persisted on/off toggle for the daily รายงาน push (/report off|on, ปิดรายงาน/เปิดรายงาน); see Section 8.21
 │   │   ├── botIdentity.js          # [Phase 2, Increment 5] Role-based LINE credential set (dev/prod/dr) + active-role/learned-groupId persistence, driving /switch dr|prod; see Section 8.22
 │   │   ├── deviceHealth.js         # [Phase 2, Increment 7] Gateway online/offline watchdog (Tuya REST polling), bypasses quiet mode; see Section 8.23
-│   │   └── quotaWatch.js           # [Phase 2, Increment 7] LINE push-quota warning, checked after every push, suggests /switch; see Section 8.24
+│   │   ├── quotaWatch.js           # [Phase 2, Increment 7] LINE push-quota warning, checked after every push, suggests /switch; see Section 8.24
+│   │   └── batteryAlerts.js        # [v2.6.1] Limits BATTERY_LOW to one push below the low threshold + one below the critical threshold per battery, persisted; see Section 8.25
 │   ├── templates/
 │   │   ├── securityAlerts.json     # Localized Thai alert message templates (Phase 1)
 │   │   ├── menuBuilders.js         # [Phase 2] Quick Reply builders for the full tap-menu tree (status/manage/house/arm-disarm/quiet), dynamic, not static JSON
@@ -340,6 +348,7 @@ authoritative source is `dpProfiles.js` itself, cross-referenced with
 | `pir` | Motion Detector | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) |
 | `tdq` | Breaker | `switch_1` | `true` / `false` | `RELAY_ON` / `RELAY_OFF` |
 | `sgbj` | Siren | `alarm_switch` | `true` / `false` | `ALARM_ON` / `ALARM_OFF` |
+| `sgbj` | Siren | `alarm_volume`, `alarm_time` | enum / number | none — settings echoes from the "Alarm" automation, silently ignored (v2.6.2) |
 | `watersensor`* | Water Leak Sensor | `watersensor_state` | `"alarm"` / `"normal"` | `WATER_LEAK` / *(silent)* |
 | `sos` | Emergency Button (Security Remote Control) | `arm` / `disarmed` | `"arm"` / `"disarmed"` | `REMOTE_ARMED` / `REMOTE_DISARMED` |
 | `sos` | Emergency Button (Security Remote Control) | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) — Increment 5; previously unmapped, fell through to `UNKNOWN_EVENT` |
@@ -830,6 +839,12 @@ event, that event is sent as its own normal standalone alert instead of
 being wrapped in a single-line `CHAIN_ESCALATION` — consolidation only
 kicks in once there's actually more than one thing to summarize.
 
+**v2.6.2 fix.** The window is opened *before* the opener's push is awaited,
+not after. The LINE call takes ~400ms, and every event arriving during it
+used to find no window, push standalone and open a window of its own
+(overwriting the previous one) — a burst 0.4s apart on 2026-09-27 went out
+as three separate pushes.
+
 **Quiet mode gate — two flavours, two rules.** `_push()` is the single choke
 point every LINE alert push goes through, so it's also where `quietMode.js`
 (Section 8.16) is checked. The two kinds of quiet make different promises
@@ -975,9 +990,14 @@ class EventCorrelator {
       return;
     }
 
-    await this._push(event);
+    // Open the window before awaiting the push, not after: the LINE call
+    // takes ~400ms, and anything arriving meanwhile used to find no window,
+    // push standalone and open a window of its own — on 2026-09-27 a door,
+    // a siren-settings echo and ALARM_ON 0.4s apart went out as three
+    // separate pushes, each overwriting the last one's window.
     this._openWindow();
     this.openWindow.events.push(event);
+    await this._push(event);
   }
 
   // Drop an in-progress window without flushing it. Used when ไปพัก starts:
@@ -1113,6 +1133,12 @@ this deployment's "Arm" Tap-to-Run scene enables that automation and
 leave รายงาน's mode line unknown until the next LINE command or remote
 button press.
 
+**v2.6.1 addition** — every raw payload goes through
+`batteryAlerts.observe()` before normalization (a healthy reading re-arms that
+device's battery alerts), and each `BATTERY_LOW` event must pass
+`batteryAlerts.shouldAlert()` before it reaches the correlator — see Section
+8.25.
+
 ```javascript
 require('dotenv').config();
 const path = require('path');
@@ -1132,6 +1158,7 @@ const quietMode = require('./services/quietMode');
 const houseMode = require('./services/houseMode');
 const dailyReport = require('./services/dailyReport');
 const deviceHealth = require('./services/deviceHealth');
+const batteryAlerts = require('./services/batteryAlerts');
 const tuyaRestClient = require('./services/tuyaRestClient');
 const { getBangkokTime } = require('./utils/dateTime');
 const logger = require('./utils/logger');
@@ -1185,6 +1212,9 @@ client.message(async (ws, message) => {
     // than the SDK's own [SDK:INFO] dumps, which include the base64/crypto
     // envelope. debug-only since this is per-message volume.
     logger.debug('[TUYA_IN]', rawData);
+    // Re-arm a device's low-battery alerts once it reports healthy
+    // again (battery replaced) — see batteryAlerts.js.
+    batteryAlerts.observe(rawData);
     const events = normalizer.transform(rawData);
     if (!events) return;
 
@@ -1193,6 +1223,12 @@ client.message(async (ws, message) => {
     // consolidation window, or flush a consolidated message — see
     // Section 8.8.
     for (const event of events) {
+      // Low battery isn't critical: one push below the low threshold, one
+      // more below the critical threshold, until it's replaced.
+      if (event.eventType === 'BATTERY_LOW' && !batteryAlerts.shouldAlert(event, quietMode.isQuiet())) {
+        continue;
+      }
+
       // Physical Security Remote Control arm/disarm buttons (dpProfiles.js's
       // `sos` profile) are the hardware-side counterpart to interactionRouter
       // .js's _executeArmDisarm — same houseMode/quietMode side effects,
@@ -1505,6 +1541,10 @@ logs, fixed 2026-08-17.
 
 const isTrue = (value) => value === true || value === 'true';
 
+// A DP that's known and never alert-worthy — e.g. a settings echo — so it
+// stays silent instead of falling through to UNKNOWN_EVENT.
+const ignore = () => null;
+
 // Re-read on every call (not cached at module load) so BATTERY_LOW_THRESHOLD
 // can be tuned in .env without a code change — same pattern as
 // eventCorrelator.js's windowMs(). Falls back to the original hardcoded 20%.
@@ -1565,9 +1605,14 @@ const DP_PROFILES = {
   tdq: {
     switch_1: relayState
   },
-  // Siren.
+  // Siren. The "Alarm" automation writes alarm_volume and alarm_time
+  // before alarm_switch, and the siren echoes each one back — on
+  // 2026-09-27 the alarm_time echo (380) reached LINE as a raw
+  // UNKNOWN_EVENT right before ALARM_ON. They're settings, not events.
   sgbj: {
-    alarm_switch: alarmState
+    alarm_switch: alarmState,
+    alarm_volume: ignore,
+    alarm_time: ignore
   },
   // Motion Detector.
   pir: {
@@ -1615,7 +1660,7 @@ const CONTROL_DP = {
   sgbj: 'alarm_switch'
 };
 
-module.exports = { DP_PROFILES, CONTROL_DP };
+module.exports = { DP_PROFILES, CONTROL_DP, batteryLowThreshold };
 ```
 
 ```javascript
@@ -4328,6 +4373,115 @@ async function checkAfterPush(lineService) {
 module.exports = { checkAfterPush };
 ```
 
+### 8.25 Battery Alert Limit (`src/services/batteryAlerts.js`)
+
+[v2.6.1] Devices re-report their battery on their own schedule — รีโมท sends
+`battery_percentage` every hour — and before this every reading below
+`BATTERY_LOW_THRESHOLD` was a fresh LINE push: six identical "รีโมท
+แบตเหลือ 19%" messages overnight on 2026-09-27. The Pulsar `messageId`
+dedup (Section 8.4) can't catch this, since each reading is a new message.
+A low battery isn't critical, so a device now gets at most two
+`BATTERY_LOW` pushes per battery: one below `BATTERY_LOW_THRESHOLD`
+(default 20%), and one last warning below `BATTERY_CRITICAL_THRESHOLD`
+(default 5%). A reading that skips straight past both sends just one.
+
+The next reading at or above `BATTERY_LOW_THRESHOLD` (battery replaced)
+silently re-arms the device — no LINE message, only a `[BATTERY]` log line.
+While quiet (ไปพัก or timed เงียบๆหน่อย) the push would be suppressed
+anyway, so the stage isn't spent and the first reading after quiet ends
+delivers it. State is persisted to `BATTERY_STATE_FILE` so a restart doesn't
+re-announce a known low battery; seed it by hand
+(`{"<deviceId>":"low"}`) for a device the group was already told about.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const { batteryLowThreshold } = require('../config/dpProfiles');
+const logger = require('../utils/logger');
+
+// At most two BATTERY_LOW pushes per device per battery: one when it first
+// drops below BATTERY_LOW_THRESHOLD (default 20%), and one last warning below
+// BATTERY_CRITICAL_THRESHOLD (default 5%). A low battery isn't an emergency,
+// but devices keep reporting it on their own schedule (รีโมท re-sends
+// battery_percentage every hour), and without this every one of those
+// readings became a fresh LINE push: six identical "รีโมท แบตเหลือ 19%"
+// messages overnight on 2026-09-27, each one burning LINE quota. The pulsar
+// messageId dedup in app.js can't catch this — each hourly reading is a
+// genuinely new message.
+//
+// Re-armed only when the same device later reports a healthy reading
+// (>= BATTERY_LOW_THRESHOLD), i.e. the battery was actually changed.
+//
+// Persisted ({ deviceId: 'low' | 'critical' }) so a restart doesn't
+// re-announce a battery the user was already told about — same runtime-state
+// tier as report-state.json.
+const STATE_FILE = process.env.BATTERY_STATE_FILE || path.join(__dirname, '../../battery-alert-state.json');
+
+// Re-read on every call, same as batteryLowThreshold().
+const batteryCriticalThreshold = () => Number(process.env.BATTERY_CRITICAL_THRESHOLD) || 5;
+
+// Both DP codes batteryLow() handles in dpProfiles.js (`qt` uses `battery`).
+const BATTERY_CODES = new Set(['battery_percentage', 'battery']);
+
+let alerted = load();
+
+function load() {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return {};
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch (err) {
+    logger.error('[BATTERY] Failed to load alert state, starting empty:', err);
+    return {};
+  }
+}
+
+function persist() {
+  try {
+    if (Object.keys(alerted).length === 0) {
+      if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+    } else {
+      fs.writeFileSync(STATE_FILE, JSON.stringify(alerted));
+    }
+  } catch (err) {
+    logger.error('[BATTERY] Failed to persist alert state:', err);
+  }
+}
+
+// Called with every raw Tuya payload, before normalization — healthy battery
+// readings never become events (batteryLow() returns null), so this is the
+// only place a recovery can be seen.
+function observe(rawData) {
+  if (!rawData || !rawData.devId || !Array.isArray(rawData.status)) return;
+  if (!alerted[rawData.devId]) return;
+  const recovered = rawData.status.some(
+    (dp) => BATTERY_CODES.has(dp.code) && typeof dp.value === 'number' && dp.value >= batteryLowThreshold()
+  );
+  if (!recovered) return;
+  delete alerted[rawData.devId];
+  persist();
+  logger.info(`[BATTERY] ${rawData.devId} back above threshold — low-battery alerts re-armed`);
+}
+
+// True if this BATTERY_LOW should go out; records which stage was sent.
+// While quiet (ไปพัก or a timed เงียบๆหน่อย) the push would be suppressed
+// anyway, so the stage isn't spent — the next reading after quiet ends
+// delivers it instead.
+function shouldAlert(event, isQuiet) {
+  const stage = event.batteryLevel < batteryCriticalThreshold() ? 'critical' : 'low';
+  const sent = alerted[event.deviceId];
+  if (sent === 'critical' || sent === stage) {
+    logger.info(`[BATTERY] Suppressed repeat (BATTERY_LOW ${event.batteryLevel}%) for ${event.deviceName} — ${sent} alert already sent`);
+    return false;
+  }
+  if (isQuiet) return true;
+  alerted[event.deviceId] = stage;
+  persist();
+  return true;
+}
+
+module.exports = { observe, shouldAlert };
+```
+
 ---
 
 ## 9. Definition of Done
@@ -4426,6 +4580,18 @@ Phase 1 is complete when all of the following hold:
 * A failed Tuya poll leaves the known state unchanged — no false offline alert from a REST error.
 * After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
 * During ไปพัก the quota warning is held back and delivered by the first push after ไปพัก ends.
+
+### v2.6.2 (Siren Settings Echo, Correlator Window Race)
+
+* The siren's `alarm_volume`/`alarm_time` reports (sent when the "Alarm" automation fires) produce no LINE message — no raw `UNKNOWN_EVENT`.
+* Events arriving while a burst's first push is still in flight join its window instead of each pushing standalone. Replaying the production 2026-09-27 12:01 sequence produces a door push and an `ALARM_ON` push (2), not the 3 originally observed; four events within 0.3s produce the opener plus one `CHAIN_ESCALATION`.
+
+### v2.6.1 (Battery Alert Limit)
+
+* A device reporting below `BATTERY_LOW_THRESHOLD` hourly produces exactly one `BATTERY_LOW` push; every later reading at the same stage logs `[BATTERY] Suppressed repeat` and sends nothing.
+* Dropping below `BATTERY_CRITICAL_THRESHOLD` (default 5%) produces exactly one more push, then silence.
+* A reading at or above `BATTERY_LOW_THRESHOLD` (battery replaced) sends nothing, and re-arms both stages for that device.
+* A restart doesn't re-send an alert already delivered (`BATTERY_STATE_FILE`); a `BATTERY_LOW` arriving during ไปพัก or timed เงียบๆหน่อย is not counted as sent.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code
 

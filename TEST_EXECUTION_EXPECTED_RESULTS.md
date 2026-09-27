@@ -57,7 +57,10 @@ go out.
    → one `CHAIN_ESCALATION` listing all of them. `ALARM_ON` always
    force-flushes immediately (`TERMINAL_EVENT`). `windowMs = 15000`
    (`EVENT_CORRELATION_WINDOW_MS`, explicit in `.env`). Still **one global
-   window** — no per-device/per-zone separation.
+   window** — no per-device/per-zone separation. Since v2.6.2 the window
+   opens *before* the opener's push is awaited, so an event arriving while
+   that ~400ms LINE call is in flight buffers as traced here — before that,
+   it pushed standalone and opened a competing window.
 
 4. **No Redis, no quota tracking.** Unchanged from the prior revision — no
    security-mode store, no push-quota tracking exists. Every `DOOR_OPENED`

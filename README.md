@@ -1,6 +1,6 @@
 # RuckYom (รักยม)
 
-Real-time smart home security engine: consumes Tuya IoT sensor events over Pulsar WebSocket, pushes Thai-language alerts to a LINE group, and lets the group interact back — device status/history, control, arm/disarm, and quiet mode. It also warns when a Zigbee gateway goes offline and when the LINE bot's monthly push quota is nearly used up.
+Real-time smart home security engine: consumes Tuya IoT sensor events over Pulsar WebSocket, pushes Thai-language alerts to a LINE group, and lets the group interact back — device status/history, control, arm/disarm, and quiet mode. It also warns when a Zigbee gateway goes offline and when the LINE bot's monthly push quota is nearly used up. Low-battery alerts go out at most twice per battery (below 20%, then below 5%).
 
 See [`RUCKYOM_SPECIFICATION.md`](./RUCKYOM_SPECIFICATION.md) for the full architecture, roadmap, and implementation reference.
 

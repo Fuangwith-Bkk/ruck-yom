@@ -131,8 +131,8 @@ registered device Alarm (Product Name: ZA03ZTU 报警器 — alarm/siren).
 
 | Code | Type | Values | Handled |
 |---|---|---|---|
-| `alarm_volume` | Enum | `low`, `middle`, `high`, `mute` | ⚠️ |
-| `alarm_time` | Integer | unit `S`, range 1–380, step 1 | ⚠️ |
+| `alarm_volume` | Enum | `low`, `middle`, `high`, `mute` | ✅ ignored — settings echo (`ignore` in `dpProfiles.js`), no message |
+| `alarm_time` | Integer | unit `S`, range 1–380, step 1 | ✅ ignored — settings echo (`ignore` in `dpProfiles.js`), no message |
 | `alarm_switch` | Boolean | `{true, false}` | ✅ `ALARM_ON` (`true`) / `ALARM_OFF` (`false`) |
 
 ---
@@ -204,3 +204,5 @@ miscategorized generic device.
 | 2026-08-15 | `sos`'s `arm`/`disarmed`/`home` DPs confirmed real (Enum, single-value range) after switching the product to DP Instruction mode — but confirmed **not commandable** from the cloud (`2008 command or value not support`), since this is a battery-powered Zigbee end device that can't receive downlink commands. เฝ้าบ้าน/ไปพัก resolved instead by triggering pre-built Tap-to-Run Scenes (`triggerScene()` in `tuyaRestClient.js`) — confirmed working live via LINE. |
 | 2026-08-17 | `sos`'s `battery_percentage` marked ✅ handled — confirmed via production logs that รีโมท reports this DP every few hours, but with no entry in `dpProfiles.js`'s `sos` profile it fell through to `UNKNOWN_EVENT` on every reading, spamming the raw DP JSON to LINE. Now mapped through the shared `batteryLow()` resolver, same as every other category. The `< 20%` threshold used by `batteryLow()` across all categories is no longer hardcoded — tunable via the new `BATTERY_LOW_THRESHOLD` env var (default 20). |
 | 2026-09-23 | Zigbee gateways (`wg2`, e.g. "ครหวัน Zigbee LAN GW") have no DPs this app reads, but their device-level `online` flag (`GET /v1.0/devices/{device_id}`, `tuyaRestClient.getDeviceInfo()`) is now polled by `deviceHealth.js` for offline/online alerts — Pulsar delivered no online/offline event during the 2026-09-22 outage. Gateways are watched by default; `"watchOnline": false` in `deviceRegistry.json` opts one out. |
+| 2026-09-27 | `battery_percentage`/`battery` readings below the threshold no longer push on every report — รีโมท's hourly 19% sent six identical alerts overnight. `batteryAlerts.js` now allows one `BATTERY_LOW` below `BATTERY_LOW_THRESHOLD` and one more below `BATTERY_CRITICAL_THRESHOLD` (default 5%) per device, re-armed silently when a healthy reading shows the battery was replaced. Applies to every category that maps a battery DP. |
+| 2026-09-27 | `sgbj`'s `alarm_volume`/`alarm_time` marked ✅ ignored — the "Alarm" automation writes `alarm_volume: high`, `alarm_time: 380`, then `alarm_switch: true`, and the siren echoes each one. The `alarm_time` echo reached LINE as a raw `UNKNOWN_EVENT` at 12:01:07 right before `ALARM_ON`. Both now map to `ignore` (silent); `alarm_switch` is unchanged. |

@@ -3,6 +3,23 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.6.2] - 2026-09-27
+
+### Fixed
+- **Raw `alarm_time` message when the alarm fires** — the Tuya "Alarm" automation writes `alarm_volume: high` and `alarm_time: 380` before `alarm_switch: true`, and the siren echoes each one. `sgbj` only mapped `alarm_switch`, so the `alarm_time` echo reached LINE as an `UNKNOWN_EVENT` with raw DP JSON at 12:01:07 on 2026-09-27, right before `ALARM_ON`. Both settings DPs now map to a new `ignore` resolver in `dpProfiles.js` and stay silent.
+- **Bursts within ~0.4s weren't consolidated** — `EventCorrelator.process()` awaited the opener's LINE push (~400ms) *before* opening the window, so events arriving during it each pushed standalone and opened a window of their own, overwriting the last. At 12:01 on 2026-09-27 a door, the `alarm_time` echo and `ALARM_ON` went out as three separate pushes. The window now opens before the push is awaited.
+
+## [2.6.1] - 2026-09-27
+
+### Fixed
+- **Repeated low-battery alerts** — รีโมท re-reports `battery_percentage` every hour, and every reading below `BATTERY_LOW_THRESHOLD` became a new push: six identical "รีโมท แบตใกล้หมดแล้ว เหลือ 19%" messages between 02:51 and 07:52 on 2026-09-27, all burning LINE quota. The Pulsar `messageId` dedup couldn't catch them, since each reading is a new message. New `src/services/batteryAlerts.js` limits every device to one `BATTERY_LOW` below `BATTERY_LOW_THRESHOLD` and one last warning below the new `BATTERY_CRITICAL_THRESHOLD` (default 5%). A healthy reading (battery replaced) silently re-arms the device. An alert that would have been suppressed by ไปพัก/เงียบๆหน่อย isn't counted as sent.
+
+### Added
+- **`BATTERY_CRITICAL_THRESHOLD`** (default 5) and **`BATTERY_STATE_FILE`** (default `./battery-alert-state.json`, gitignored) — the second env var persists which devices were already alerted, so a restart doesn't repeat them.
+
+### Upgrade notes
+- To keep a device the group was already warned about from alerting once more after the upgrade, create `battery-alert-state.json` before restarting, e.g. `{"a338538aca3f103d108nhk":"low"}`.
+
 ## [2.6.0] - 2026-09-23
 
 ### Added
