@@ -232,6 +232,7 @@ EVENT_CORRELATION_WINDOW_MS=15000              # Door->motion->alarm consolidati
 # Battery Alerts
 BATTERY_LOW_THRESHOLD=20                       # [Phase 2, Increment 5] battery_percentage/battery DP value (%) below which a device triggers BATTERY_LOW (Section 8.11's batteryLow()). Optional, defaults to 20.
 BATTERY_CRITICAL_THRESHOLD=5                   # [v2.6.1] Battery % below which a device that already got its BATTERY_LOW alert gets one last one (Section 8.25). Optional, defaults to 5.
+BATTERY_REARM_THRESHOLD=50                     # [v2.6.3] Battery % at or above which an already-alerted device counts as "battery replaced" and its alerts re-arm. Kept well above BATTERY_LOW_THRESHOLD so a reading wobbling 19 -> 20 -> 19 doesn't re-alert (Section 8.25). Optional, defaults to 50.
 BATTERY_STATE_FILE=./battery-alert-state.json  # [v2.6.1] Which devices already got their low/critical battery alert ({ deviceId: "low" | "critical" }) — survives restarts (Section 8.25). Optional, defaults to ./battery-alert-state.json.
 
 # Daily Summary
@@ -1134,7 +1135,7 @@ leave รายงาน's mode line unknown until the next LINE command or remo
 button press.
 
 **v2.6.1 addition** — every raw payload goes through
-`batteryAlerts.observe()` before normalization (a healthy reading re-arms that
+`batteryAlerts.observe()` before normalization (a reading at or above `BATTERY_REARM_THRESHOLD` re-arms that
 device's battery alerts), and each `BATTERY_LOW` event must pass
 `batteryAlerts.shouldAlert()` before it reaches the correlator — see Section
 8.25.
@@ -1660,7 +1661,7 @@ const CONTROL_DP = {
   sgbj: 'alarm_switch'
 };
 
-module.exports = { DP_PROFILES, CONTROL_DP, batteryLowThreshold };
+module.exports = { DP_PROFILES, CONTROL_DP };
 ```
 
 ```javascript
@@ -4385,8 +4386,12 @@ A low battery isn't critical, so a device now gets at most two
 (default 20%), and one last warning below `BATTERY_CRITICAL_THRESHOLD`
 (default 5%). A reading that skips straight past both sends just one.
 
-The next reading at or above `BATTERY_LOW_THRESHOLD` (battery replaced)
-silently re-arms the device — no LINE message, only a `[BATTERY]` log line.
+The next reading at or above `BATTERY_REARM_THRESHOLD` (default 50%, i.e.
+the battery was replaced) silently re-arms the device — no LINE message,
+only a `[BATTERY]` log line. **[v2.6.3]** This used to be
+`BATTERY_LOW_THRESHOLD`, but readings wobble by a point near the line (รีโมท
+read 20% then 19% an hour apart), and every 19 → 20 → 19 bounce re-armed and
+re-alerted. A fresh battery reads near 100%; a tired one never jumps to 50%.
 While quiet (ไปพัก or timed เงียบๆหน่อย) the push would be suppressed
 anyway, so the stage isn't spent and the first reading after quiet ends
 delivers it. State is persisted to `BATTERY_STATE_FILE` so a restart doesn't
@@ -4396,7 +4401,6 @@ re-announce a known low battery; seed it by hand
 ```javascript
 const fs = require('fs');
 const path = require('path');
-const { batteryLowThreshold } = require('../config/dpProfiles');
 const logger = require('../utils/logger');
 
 // At most two BATTERY_LOW pushes per device per battery: one when it first
@@ -4409,16 +4413,20 @@ const logger = require('../utils/logger');
 // messageId dedup in app.js can't catch this — each hourly reading is a
 // genuinely new message.
 //
-// Re-armed only when the same device later reports a healthy reading
-// (>= BATTERY_LOW_THRESHOLD), i.e. the battery was actually changed.
+// Re-armed only when the same device later reports a clearly fresh reading
+// (>= BATTERY_REARM_THRESHOLD, default 50%), i.e. the battery was actually
+// changed. Not merely >= BATTERY_LOW_THRESHOLD: readings wobble by a point
+// near the line (รีโมท read 20% then 19% an hour apart on 2026-09-27), and
+// each 19 -> 20 -> 19 bounce would otherwise re-arm and re-alert.
 //
 // Persisted ({ deviceId: 'low' | 'critical' }) so a restart doesn't
 // re-announce a battery the user was already told about — same runtime-state
 // tier as report-state.json.
 const STATE_FILE = process.env.BATTERY_STATE_FILE || path.join(__dirname, '../../battery-alert-state.json');
 
-// Re-read on every call, same as batteryLowThreshold().
+// Re-read on every call, same as dpProfiles.js's batteryLowThreshold().
 const batteryCriticalThreshold = () => Number(process.env.BATTERY_CRITICAL_THRESHOLD) || 5;
+const batteryRearmThreshold = () => Number(process.env.BATTERY_REARM_THRESHOLD) || 50;
 
 // Both DP codes batteryLow() handles in dpProfiles.js (`qt` uses `battery`).
 const BATTERY_CODES = new Set(['battery_percentage', 'battery']);
@@ -4449,17 +4457,17 @@ function persist() {
 
 // Called with every raw Tuya payload, before normalization — healthy battery
 // readings never become events (batteryLow() returns null), so this is the
-// only place a recovery can be seen.
+// only place a replaced battery can be seen.
 function observe(rawData) {
   if (!rawData || !rawData.devId || !Array.isArray(rawData.status)) return;
   if (!alerted[rawData.devId]) return;
   const recovered = rawData.status.some(
-    (dp) => BATTERY_CODES.has(dp.code) && typeof dp.value === 'number' && dp.value >= batteryLowThreshold()
+    (dp) => BATTERY_CODES.has(dp.code) && typeof dp.value === 'number' && dp.value >= batteryRearmThreshold()
   );
   if (!recovered) return;
   delete alerted[rawData.devId];
   persist();
-  logger.info(`[BATTERY] ${rawData.devId} back above threshold — low-battery alerts re-armed`);
+  logger.info(`[BATTERY] ${rawData.devId} battery replaced — low-battery alerts re-armed`);
 }
 
 // True if this BATTERY_LOW should go out; records which stage was sent.
@@ -4581,6 +4589,11 @@ Phase 1 is complete when all of the following hold:
 * After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
 * During ไปพัก the quota warning is held back and delivered by the first push after ไปพัก ends.
 
+### v2.6.3 (Battery Re-arm Hysteresis)
+
+* An alerted device whose readings wobble around `BATTERY_LOW_THRESHOLD` (19 → 20 → 19 → 21 → 19) gets no further alert; only a reading at or above `BATTERY_REARM_THRESHOLD` (default 50%) re-arms it, logged as `battery replaced — low-battery alerts re-armed`.
+* A reading between the two thresholds (e.g. 30% after a critical alert) re-arms nothing.
+
 ### v2.6.2 (Siren Settings Echo, Correlator Window Race)
 
 * The siren's `alarm_volume`/`alarm_time` reports (sent when the "Alarm" automation fires) produce no LINE message — no raw `UNKNOWN_EVENT`.
@@ -4590,7 +4603,7 @@ Phase 1 is complete when all of the following hold:
 
 * A device reporting below `BATTERY_LOW_THRESHOLD` hourly produces exactly one `BATTERY_LOW` push; every later reading at the same stage logs `[BATTERY] Suppressed repeat` and sends nothing.
 * Dropping below `BATTERY_CRITICAL_THRESHOLD` (default 5%) produces exactly one more push, then silence.
-* A reading at or above `BATTERY_LOW_THRESHOLD` (battery replaced) sends nothing, and re-arms both stages for that device.
+* A reading at or above `BATTERY_REARM_THRESHOLD` (battery replaced) sends nothing, and re-arms both stages for that device.
 * A restart doesn't re-send an alert already delivered (`BATTERY_STATE_FILE`); a `BATTERY_LOW` arriving during ไปพัก or timed เงียบๆหน่อย is not counted as sent.
 
 ## 10. Vibe Coding Prompting Sequence for Cursor / Claude Code

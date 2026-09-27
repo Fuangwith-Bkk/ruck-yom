@@ -3,6 +3,17 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.6.3] - 2026-09-27
+
+### Fixed
+- **Battery readings wobbling around 20% could re-alert** — 2.6.1 re-armed a device's battery alerts on any reading at or above `BATTERY_LOW_THRESHOLD`, but readings bounce by a point near the line (รีโมท read 20% at 01:51, 19% at 02:51 on 2026-09-27), so every 19 → 20 → 19 bounce would re-arm and send the low alert again. Re-arm now needs a reading at or above the new `BATTERY_REARM_THRESHOLD` (default 50%) — a replaced battery reads near 100%, a tired one never reaches 50%. The log line now reads `battery replaced — low-battery alerts re-armed`.
+
+### Added
+- **`BATTERY_REARM_THRESHOLD`** (default 50).
+
+### Changed
+- `dpProfiles.js` no longer exports `batteryLowThreshold` — `batteryAlerts.js` was its only importer.
+
 ## [2.6.2] - 2026-09-27
 
 ### Fixed

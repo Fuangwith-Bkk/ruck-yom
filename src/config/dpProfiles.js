@@ -144,4 +144,4 @@ const CONTROL_DP = {
   sgbj: 'alarm_switch'
 };
 
-module.exports = { DP_PROFILES, CONTROL_DP, batteryLowThreshold };
+module.exports = { DP_PROFILES, CONTROL_DP };
