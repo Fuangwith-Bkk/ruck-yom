@@ -180,6 +180,30 @@ miscategorized generic device.
 
 ---
 
+## `wsdcg` — Temperature & Humidity Sensor
+
+**Remark:** confirmed via Tuya Cloud API (`GET /v1.0/devices/{device_id}`,
+2026-10-26) and the Tuya IoT Platform's Device Debugging → Standard Status
+Set for อุณหภูมิความชื้น ชั้น 1 (Product Name: T&H Sensor, Zigbee
+sub-device). Before it was registered, every `va_humidity` report reached
+LINE as a raw `UNKNOWN_EVENT` and helped use up bot-dr's October push
+quota. Readings are routine telemetry, so they map to `ignore` in
+`dpProfiles.js`; current values are shown by the status card and รายงาน
+(`statusCard.js` `describeState`, category `climate`) instead.
+
+### Status Set
+
+| Code | Type | Values | Handled |
+|---|---|---|---|
+| `va_temperature` | Integer | unit `℃`, range −200–600, **scale 1**, step 1 (312 = 31.2 ℃) | ✅ ignored (silent); shown as `31.2°C` on the status card |
+| `va_humidity` | Integer | unit `%`, range 0–100, scale 0, step 1 | ✅ ignored (silent); shown as `ชื้น 77%` on the status card |
+| `battery_percentage` | Integer | unit `%`, range 0–100, scale 0, step 1 | ✅ `BATTERY_LOW` when below `BATTERY_LOW_THRESHOLD` (default 20%) |
+| `temp_unit_convert` | Enum | `c`, `f` | ✅ ignored (silent); picks `°C`/`°F` on the status card |
+
+*(The Standard Instruction Set lists only `temp_unit_convert`.)*
+
+---
+
 ## Handled elsewhere, no category entry yet
 
 - `watersensor_state` (Water Leak Sensor) — mapped in `sensorNormalizer.js`'s
@@ -207,3 +231,4 @@ miscategorized generic device.
 | 2026-09-27 | `battery_percentage`/`battery` readings below the threshold no longer push on every report — รีโมท's hourly 19% sent six identical alerts overnight. `batteryAlerts.js` now allows one `BATTERY_LOW` below `BATTERY_LOW_THRESHOLD` and one more below `BATTERY_CRITICAL_THRESHOLD` (default 5%) per device, re-armed silently when a healthy reading shows the battery was replaced. Applies to every category that maps a battery DP. |
 | 2026-09-27 | `sgbj`'s `alarm_volume`/`alarm_time` marked ✅ ignored — the "Alarm" automation writes `alarm_volume: high`, `alarm_time: 380`, then `alarm_switch: true`, and the siren echoes each one. The `alarm_time` echo reached LINE as a raw `UNKNOWN_EVENT` at 12:01:07 right before `ALARM_ON`. Both now map to `ignore` (silent); `alarm_switch` is unchanged. |
 | 2026-09-27 | Battery re-arm (v2.6.3) now needs a reading at or above `BATTERY_REARM_THRESHOLD` (default 50%), not just `BATTERY_LOW_THRESHOLD` — รีโมท's `battery_percentage` was seen at 20% then 19% an hour apart, and a bounce across 20% would have re-alerted. |
+| 2026-10-26 | Added `wsdcg` (Temperature & Humidity Sensor), confirmed against อุณหภูมิความชื้น ชั้น 1 via the Tuya Cloud API and the platform's Standard Status Set. `va_temperature`/`va_humidity`/`temp_unit_convert` map to `ignore`; `battery_percentage` to `batteryLow()`. Unregistered, its `va_humidity` reports had been reaching LINE as `UNKNOWN_EVENT` and spending push quota. |

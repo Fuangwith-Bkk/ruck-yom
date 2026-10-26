@@ -14,7 +14,7 @@ function validateEnv() {
   const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
 
   // LINE credentials are role-prefixed (botIdentity.js) rather than flat
-  // vars, since /switch dr|prod can point this process at a different
+  // vars, since /switch prod|dr|dev can point this process at a different
   // credential set without a restart — only the *currently* active role's
   // token+secret need to exist at boot; the other role(s) are only
   // required once actually switched to.

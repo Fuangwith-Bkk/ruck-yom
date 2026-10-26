@@ -18,7 +18,7 @@ function createWebhookServer() {
   // role's channel secret (botIdentity.js) and parses the JSON body — a
   // request that fails signature verification never reaches the route
   // handler at all. Resolved fresh per request (not built once at server
-  // startup) so /switch dr|prod takes effect immediately: only one bot is
+  // startup) so /switch prod|dr|dev takes effect immediately: only one bot is
   // ever actually a member of the group at a time (LINE doesn't allow two),
   // so whichever role is active is always the only one whose signature can
   // legitimately validate anyway.

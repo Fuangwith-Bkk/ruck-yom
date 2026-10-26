@@ -3,6 +3,26 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.7.0] - 2026-10-26
+
+### Added
+- **Temperature & humidity sensor support** (`wsdcg`) — a new T&H Sensor (อุณหภูมิความชื้น ชั้น 1) was unregistered, so every `va_humidity` report reached LINE as a raw `UNKNOWN_EVENT` ("ตรวจพบว่า {"code":"va_humidity",...}") and helped use up bot-dr's October push quota. New `wsdcg` profile in `dpProfiles.js`: `va_temperature`, `va_humidity` and `temp_unit_convert` are silent, `battery_percentage` uses the usual `BATTERY_LOW` limit. New `climate` category (🌡️ อุณหภูมิ) in `deviceCategories.js`; the status card and รายงาน show `🌡️ 31.2°C · ชื้น 77%` (`va_temperature` is in tenths).
+- **Third switchable bot** — `/switch dev` now works alongside `/switch prod|dr`, so รักยม - DEV can stand in for prod and the group can rotate through three free-plan monthly quotas instead of two.
+- **Quota-spent note on replies** — once the active bot's quota is actually used up (a push rejected with LINE's "monthly limit" 429, or a check seeing usage at the limit), every reply to the group carries a note saying so and naming the `/switch` target. Replies don't use quota, so this still gets through when pushes can't. Not added to the `/switch` confirmation or to a reply already at LINE's 5-message cap.
+
+### Fixed
+- **No warning before the quota ran out** — on 2026-10-26 bot-dr hit its monthly limit without the warning. LINE counts a group push once per member (6 in the family group), so the 280 default left only ~3 pushes of headroom, and pushes landing while a quota check was in flight skipped their own check, so a burst could carry usage from below 280 to 300 unseen. A push during an in-flight check now triggers one follow-up check, and `LINE_QUOTA_WARN_AT` defaults to 240.
+- **Warning could recommend a bot that was also spent** — with three bots it now recommends the other bot with the most quota left (`/switch dev (เหลือ 260 ครั้ง)`), and says alerts stop until next month when every other bot is spent.
+
+### Changed
+- `lineMessaging.getQuota(role)` takes an optional role (defaults to the active one); `replyMessage(replyToken, messages, { quotaNote })` takes an options argument.
+
+### Upgrade notes
+- **`.env` on the prod server:** set `LINE_QUOTA_WARN_AT=240` — a value in `.env` overrides the new default. To use `/switch dev`, add `LINE_DEV_CHANNEL_ACCESS_TOKEN`/`LINE_DEV_CHANNEL_SECRET` and leave `LINE_DEV_GROUP_ID` empty so it learns the family group.
+- **LINE Developers console → รักยม - DEV:** point its Webhook URL at the prod server's `/webhook`, turn on *Use webhook* and *Verify*, and allow it to join group chats. While it serves prod, local testing with it gets no webhooks and spends the same quota.
+- **`deviceRegistry.json` on the prod server** (untracked): add the sensor, e.g. first so it leads รายงาน:
+  `"a3de2af117977ce160pkyw": { "name": "อุณหภูมิความชื้น ชั้น 1", "category": "climate", "dpProfile": "wsdcg" }`
+
 ## [2.6.3] - 2026-09-27
 
 ### Fixed

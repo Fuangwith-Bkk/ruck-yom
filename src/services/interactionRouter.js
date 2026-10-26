@@ -59,11 +59,11 @@ const REPORT_OFF_TRIGGERS = new Set(['/report off', 'ปิดรายงาน
 const REPORT_ON_TRIGGERS = new Set(['/report on', 'เปิดรายงาน']);
 
 // Hot-swaps which credential set (botIdentity.js) outgoing messages use —
-// prod<->dr only (never dev). Group membership itself is never touched
+// any of prod, dr or dev. Group membership itself is never touched
 // here: the user removes/invites the bots by hand in the LINE app; this
 // just points the running process at the other bot's token/secret/groupId
 // so that manual step is the only one left to do.
-const SWITCH_COMMAND_RE = /^\/switch\s+(prod|dr)$/;
+const SWITCH_COMMAND_RE = /^\/switch\s+(prod|dr|dev)$/;
 
 class InteractionRouter {
   constructor(lineService) {
@@ -394,7 +394,7 @@ class InteractionRouter {
       text:
         `สลับไปใช้ bot-${targetRole} แล้วครับ ตอนนี้ไปที่ LINE app: เอา bot-${currentRole} ` +
         `ออกจากกลุ่มนี้ แล้วเชิญ bot-${targetRole} เข้ากลุ่มแทนได้เลยครับ`
-    });
+    }, { quotaNote: false });
 
     botIdentity.setActiveRole(targetRole);
   }

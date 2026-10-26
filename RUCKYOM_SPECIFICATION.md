@@ -71,8 +71,11 @@
 │   8.13's getSceneRule)                                                          │
 │ • Gateway offline/online alerts — Tuya REST polling of the `online` flag,     │
 │   bypassing quiet mode (deviceHealth.js, Section 8.23)                          │
-│ • LINE quota warning — checked after every push, suggests /switch at 280/300  │
+│ • LINE quota warning — checked after every push, suggests /switch at 240/300  │
+│   to the bot with the most quota left; once spent, every reply carries a note │
 │   (quotaWatch.js, Section 8.24)                                                 │
+│ • Third switchable bot — /switch prod|dr|dev (botIdentity.js, Section 8.22)    │
+│ • Temperature & humidity sensor (wsdcg) — readings silent, shown in รายงาน     │
 │ • Battery alert limit — BATTERY_LOW sent once below 20%, once more below 5%,  │
 │   then silent until the battery is replaced (batteryAlerts.js, Section 8.25)    │
 │ • Not yet built: breaker timer preset                                           │
@@ -207,12 +210,14 @@ TUYA_MQ_URL=wss://mqe-sg.iotbing.com:8285/
 TUYA_MQ_ENV=PROD
 
 # LINE Messaging API Credentials
-# [Phase 2, Increment 5] Role-prefixed rather than flat vars: /switch dr|prod
-# (Section 8.14/8.22) hot-swaps which credential set outgoing messages use,
-# with no restart — required because LINE doesn't allow two bots to be
-# members of the same group chat at once, so exactly one of prod/dr is ever
-# really in the group; dev is the local/testing identity, never
-# chat-switchable.
+# [Phase 2, Increment 5] Role-prefixed rather than flat vars: /switch
+# prod|dr|dev (Section 8.14/8.22) hot-swaps which credential set outgoing
+# messages use, with no restart — required because LINE doesn't allow two
+# bots to be members of the same group chat at once, so exactly one of
+# prod/dr/dev is ever really in the group. dev is the local/testing
+# identity, switchable since v2.7.0 as a third prod bot for its quota —
+# leave LINE_DEV_GROUP_ID empty on the prod server so it learns the family
+# group instead of a test group.
 LINE_ACTIVE_ROLE=dev                           # Which set is active at boot — dev|prod|dr. Only the *initial* value: once /switch has been used, LINE_ROLE_STATE_FILE below wins on every later restart.
 LINE_DEV_CHANNEL_ACCESS_TOKEN=your_dev_line_channel_access_token
 LINE_DEV_CHANNEL_SECRET=your_dev_line_channel_secret
@@ -243,7 +248,7 @@ REPORT_STATE_FILE=./report-state.json          # [Phase 2, Increment 5] Existenc
 DEVICE_ONLINE_CHECK_INTERVAL_SEC=120           # [Phase 2, Increment 7] How often (s) to poll Tuya's `online` flag for each watched device — category "gateway" by default, overridable per registry entry with "watchOnline" (Section 8.23). One Tuya API call per watched device per check. Optional, defaults to 120.
 
 # LINE Quota Warning
-LINE_QUOTA_WARN_AT=280                         # [Phase 2, Increment 7] Checked after every push: once the active bot has used this many push messages this month, warn once and suggest /switch (Section 8.24). Held back during ไปพัก. Optional, defaults to 280.
+LINE_QUOTA_WARN_AT=240                         # [Phase 2, Increment 7] Checked after every push: once the active bot has used this many push messages this month, warn once and suggest /switch (Section 8.24). Held back during ไปพัก. LINE counts a group push once per member (6 in the family group), so keep ~10 pushes of headroom. Optional, defaults to 240 (was 280 before v2.7.0).
 
 # Quiet Mode (เงียบๆหน่อย)
 QUIET_STATE_FILE=./quiet-state.json            # Crash-recovery marker file (existence-only signal, not real state persistence). Optional, defaults to ./quiet-state.json.
@@ -301,7 +306,7 @@ ruck-yom/
 │   │   ├── statusReport.js         # [Phase 2, Increment 4] Shared รายงาน builder (device status + houseMode/quietMode + LINE quota) — used by both the manual command and the daily push; see Section 8.19
 │   │   ├── dailyReport.js          # [Phase 2, Increment 4] Optional once-daily automatic รายงาน push (DAILY_REPORT_TIME), gated by reportMode.js; see Section 8.20
 │   │   ├── reportMode.js           # [Phase 2, Increment 5] Persisted on/off toggle for the daily รายงาน push (/report off|on, ปิดรายงาน/เปิดรายงาน); see Section 8.21
-│   │   ├── botIdentity.js          # [Phase 2, Increment 5] Role-based LINE credential set (dev/prod/dr) + active-role/learned-groupId persistence, driving /switch dr|prod; see Section 8.22
+│   │   ├── botIdentity.js          # [Phase 2, Increment 5] Role-based LINE credential set (dev/prod/dr) + active-role/learned-groupId persistence, driving /switch prod|dr|dev; see Section 8.22
 │   │   ├── deviceHealth.js         # [Phase 2, Increment 7] Gateway online/offline watchdog (Tuya REST polling), bypasses quiet mode; see Section 8.23
 │   │   ├── quotaWatch.js           # [Phase 2, Increment 7] LINE push-quota warning, checked after every push, suggests /switch; see Section 8.24
 │   │   └── batteryAlerts.js        # [v2.6.1] Limits BATTERY_LOW to one push below the low threshold + one below the critical threshold per battery, persisted; see Section 8.25
@@ -354,6 +359,8 @@ authoritative source is `dpProfiles.js` itself, cross-referenced with
 | `sos` | Emergency Button (Security Remote Control) | `arm` / `disarmed` | `"arm"` / `"disarmed"` | `REMOTE_ARMED` / `REMOTE_DISARMED` |
 | `sos` | Emergency Button (Security Remote Control) | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) — Increment 5; previously unmapped, fell through to `UNKNOWN_EVENT` |
 | `sos` | Emergency Button (Security Remote Control) | `home` / `sos` | — | *(still `UNKNOWN_EVENT`, see `TUYA_DEVICE_DP_REGISTRY.md`)* |
+| `wsdcg` | Temperature & Humidity Sensor | `va_temperature`, `va_humidity`, `temp_unit_convert` | number (temperature in tenths, 312 = 31.2 °C) / number / `"c"`/`"f"` | none — routine readings, silently ignored (v2.7.0); shown on the status card and in รายงาน instead |
+| `wsdcg` | Temperature & Humidity Sensor | `battery_percentage` | `number` (0–100) | `BATTERY_LOW` (< `BATTERY_LOW_THRESHOLD`, default 20%) |
 
 \* `watersensor` is a placeholder profile key — no device is registered
 under it yet, and the real Tuya Product Category code hasn't been confirmed
@@ -434,7 +441,7 @@ Voice: `รักยม` is written as a small child assigned to watch the house
 ### 8.2 Environment Schema Validator (`src/config/environment.js`)
 
 **Increment 5 addition.** LINE credentials moved from flat vars to
-role-prefixed ones (`botIdentity.js`, Section 8.22) so `/switch dr|prod` can
+role-prefixed ones (`botIdentity.js`, Section 8.22) so `/switch prod|dr|dev` can
 hot-swap them with no restart. `REQUIRED_ENV` no longer lists any flat
 `LINE_*` var — it now checks only that `botIdentity.getActiveRole()`'s
 token/secret pair exists, since the other role(s) aren't needed until
@@ -457,7 +464,7 @@ function validateEnv() {
   const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
 
   // LINE credentials are role-prefixed (botIdentity.js) rather than flat
-  // vars, since /switch dr|prod can point this process at a different
+  // vars, since /switch prod|dr|dev can point this process at a different
   // credential set without a restart — only the *currently* active role's
   // token+secret need to exist at boot; the other role(s) are only
   // required once actually switched to.
@@ -473,7 +480,6 @@ function validateEnv() {
 }
 
 module.exports = { validateEnv };
-
 ```
 
 ### 8.3 Timezone Utility (`src/utils/dateTime.js`)
@@ -718,6 +724,15 @@ throws a clear error if that role hasn't had its groupId learned yet.
 signature matched that same active role's secret, so "active role" and
 "role that delivered this replyToken" are the same thing by construction.
 
+**v2.7.0 addition.** `pushMessage` marks the active role's quota as spent
+(`quotaWatch.markExhausted`) when LINE rejects a push with 429 *and* the
+"monthly limit" body (a bare 429 can also be the per-second rate limit).
+While a role is marked, `replyMessage` appends a note (replies are free) telling
+the group to `/switch` — skipped for the `/switch` confirmation itself
+(`{ quotaNote: false }`) and for replies already at LINE's 5-message cap.
+`getQuota(role)` takes an optional role so `quotaWatch.js` can compare the
+other bots' remaining quota.
+
 ```javascript
 const { messagingApi } = require('@line/bot-sdk');
 const botIdentity = require('./botIdentity');
@@ -764,10 +779,19 @@ class LineMessagingService {
     const messages =
       typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [content];
 
-    await this._clientFor(role).pushMessage({
-      to: groupId,
-      messages
-    });
+    try {
+      await this._clientFor(role).pushMessage({
+        to: groupId,
+        messages
+      });
+    } catch (err) {
+      // 429 is also LINE's per-second rate limit; only the monthly-limit
+      // body means the quota is spent (see quotaWatch.js markExhausted).
+      if (err?.status === 429 && /monthly limit/i.test(String(err.body))) {
+        quotaWatch.markExhausted(role);
+      }
+      throw err;
+    }
 
     // Every push spends quota, so this is the one place a "nearly out"
     // warning can become due — fire-and-forget so the caller never waits on
@@ -780,8 +804,10 @@ class LineMessagingService {
   // quota isn't a silent surprise. Both are lightweight GETs against LINE's
   // own API, unrelated to Tuya. Callers decide how to handle a failure
   // (statusReport.js treats it as best-effort, same as houseMode/quietMode).
-  async getQuota() {
-    const client = this._clientFor(botIdentity.getActiveRole());
+  // `role` defaults to the active one; quotaWatch.js passes the others to
+  // pick which bot to recommend switching to.
+  async getQuota(role = botIdentity.getActiveRole()) {
+    const client = this._clientFor(role);
     const [quota, consumption] = await Promise.all([
       client.getMessageQuota(),
       client.getMessageQuotaConsumption()
@@ -803,17 +829,29 @@ class LineMessagingService {
   // /switch relies on this too: interactionRouter.js sends its confirmation
   // reply *before* calling botIdentity.setActiveRole(), so it still goes
   // out via the outgoing role, exactly matching the replyToken it's tied to.
-  async replyMessage(replyToken, messages) {
-    const client = this._clientFor(botIdentity.getActiveRole());
-    await client.replyMessage({
-      replyToken,
-      messages: Array.isArray(messages) ? messages : [messages]
-    });
+  //
+  // While the active bot's push quota is spent, every reply also carries a
+  // note saying so (quotaWatch.js) — replies are free, so this is the only
+  // way the group can still find out. Skipped when `quotaNote: false` (the
+  // /switch confirmation, which is already the fix) or when the reply is
+  // already at LINE's 5-messages-per-reply cap. Building the note is
+  // best-effort: a failure sends the reply without it.
+  async replyMessage(replyToken, messages, { quotaNote = true } = {}) {
+    const role = botIdentity.getActiveRole();
+    const client = this._clientFor(role);
+    let list = Array.isArray(messages) ? messages : [messages];
+    if (quotaNote && quotaWatch.isExhausted(role) && list.length < 5) {
+      try {
+        list = [...list, { type: 'text', text: await quotaWatch.buildExhaustedNote(this, role) }];
+      } catch (err) {
+        // Reply without the note rather than not at all.
+      }
+    }
+    await client.replyMessage({ replyToken, messages: list });
   }
 }
 
 module.exports = LineMessagingService;
-
 ```
 
 ### 8.8 Event Correlator (`src/services/eventCorrelator.js`)
@@ -1646,6 +1684,18 @@ const DP_PROFILES = {
     arm: remoteArmed,
     disarmed: remoteDisarmed,
     battery_percentage: batteryLow
+  },
+  // Temperature & Humidity Sensor — confirmed via Tuya Cloud API for
+  // อุณหภูมิความชื้น ชั้น 1 (Product Name: T&H Sensor, 2026-10-26). Readings
+  // are routine telemetry, not events: with no profile registered, every
+  // va_humidity report reached LINE as a raw UNKNOWN_EVENT and helped
+  // exhaust the monthly push quota (2026-10-26). Current values are shown
+  // by the status card instead (statusCard.js describeState 'climate').
+  wsdcg: {
+    va_temperature: ignore,
+    va_humidity: ignore,
+    temp_unit_convert: ignore,
+    battery_percentage: batteryLow
   }
 };
 
@@ -1727,6 +1777,13 @@ const DEVICE_CATEGORIES = {
     controllable: true,
     actions: ['toggle']
   },
+  climate: {
+    label: 'อุณหภูมิ',
+    emoji: '🌡️',
+    inMenu: true,
+    queryable: true,
+    controllable: false
+  },
   remote: {
     label: 'รีโมท',
     emoji: '📱',
@@ -1744,7 +1801,6 @@ const DEVICE_CATEGORIES = {
 };
 
 module.exports = { DEVICE_CATEGORIES };
-
 ```
 
 This happened during Increment 1's build — the original `motion` label
@@ -2146,6 +2202,13 @@ function describeState(category, dpMap) {
     case 'water': {
       const isLeak = dpMap.watersensor_state === 'alarm' || dpMap.watersensor_state === true;
       return { stateText: isLeak ? 'ตรวจพบน้ำรั่ว!' : 'ปกติ', stateEmoji: isLeak ? '💧' : '✅' };
+    }
+    case 'climate': {
+      // wsdcg reports va_temperature in tenths of a degree (312 = 31.2).
+      const temp = typeof dpMap.va_temperature === 'number' ? (dpMap.va_temperature / 10).toFixed(1) : '-';
+      const unit = dpMap.temp_unit_convert === 'f' ? '°F' : '°C';
+      const humidity = typeof dpMap.va_humidity === 'number' ? `${dpMap.va_humidity}%` : '-';
+      return { stateText: `${temp}${unit} · ชื้น ${humidity}`, stateEmoji: '🌡️' };
     }
     case 'motion':
     default:
@@ -2881,11 +2944,11 @@ const REPORT_OFF_TRIGGERS = new Set(['/report off', 'ปิดรายงาน
 const REPORT_ON_TRIGGERS = new Set(['/report on', 'เปิดรายงาน']);
 
 // Hot-swaps which credential set (botIdentity.js) outgoing messages use —
-// prod<->dr only (never dev). Group membership itself is never touched
+// any of prod, dr or dev. Group membership itself is never touched
 // here: the user removes/invites the bots by hand in the LINE app; this
 // just points the running process at the other bot's token/secret/groupId
 // so that manual step is the only one left to do.
-const SWITCH_COMMAND_RE = /^\/switch\s+(prod|dr)$/;
+const SWITCH_COMMAND_RE = /^\/switch\s+(prod|dr|dev)$/;
 
 class InteractionRouter {
   constructor(lineService) {
@@ -3216,7 +3279,7 @@ class InteractionRouter {
       text:
         `สลับไปใช้ bot-${targetRole} แล้วครับ ตอนนี้ไปที่ LINE app: เอา bot-${currentRole} ` +
         `ออกจากกลุ่มนี้ แล้วเชิญ bot-${targetRole} เข้ากลุ่มแทนได้เลยครับ`
-    });
+    }, { quotaNote: false });
 
     botIdentity.setActiveRole(targetRole);
   }
@@ -3347,7 +3410,7 @@ module.exports = InteractionRouter;
 `middleware()` once at server-startup against a static `LINE_CHANNEL_SECRET`
 — `verifySignature` resolves `botIdentity.getActiveRole()`'s channel secret
 fresh on every request and calls `middleware({ channelSecret })` inline, so
-`/switch dr|prod` (Section 8.14) takes effect immediately with no restart.
+`/switch prod|dr|dev` (Section 8.14) takes effect immediately with no restart.
 This is safe without any multi-secret fallback because LINE never allows two
 bots to be members of the same group chat at once — whichever role is
 currently active is, by construction, the only one whose signature could
@@ -3374,7 +3437,7 @@ function createWebhookServer() {
   // role's channel secret (botIdentity.js) and parses the JSON body — a
   // request that fails signature verification never reaches the route
   // handler at all. Resolved fresh per request (not built once at server
-  // startup) so /switch dr|prod takes effect immediately: only one bot is
+  // startup) so /switch prod|dr|dev takes effect immediately: only one bot is
   // ever actually a member of the group at a time (LINE doesn't allow two),
   // so whichever role is active is always the only one whose signature can
   // legitimately validate anyway.
@@ -4001,7 +4064,10 @@ module.exports = { isEnabled, setEnabled };
 
 **Increment 5 addition.** Owns which LINE Official Account credential set
 (`dev`/`prod`/`dr`) the process currently sends/verifies as, driving
-`/switch dr|prod` (Section 8.14). Deliberately does **not** touch LINE group
+`/switch prod|dr|dev` (Section 8.14). Since v2.7.0 `dev` is switchable too,
+so prod can rotate through three free-plan monthly quotas instead of two;
+while it serves prod, its LINE channel's Webhook URL must point at the prod
+server, and local testing with it spends the same quota. Deliberately does **not** touch LINE group
 membership — LINE gives a bot no API to join a group (only `leaveGroup` to
 remove itself) and doesn't allow two bots to be members of the same group
 chat at once, so `/switch` only ever automates the backend credential swap;
@@ -4027,12 +4093,13 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 
-// Every credential set this deployment knows about. `dev` is the
-// developer's own local/testing identity, never chat-switchable. `prod`
-// and `dr` are the two real house bots — LINE doesn't allow two bots to be
-// members of the same group chat at once, so exactly one of these two is
-// ever actually sitting in the family group. /switch dr|prod
-// (interactionRouter.js) only ever toggles between these two.
+// Every credential set this deployment knows about. `prod` and `dr` are
+// the two real house bots; `dev` is the developer's own local/testing
+// identity, also switchable since 2026-10-26 as a third bot so prod can
+// rotate through three free-plan monthly push quotas instead of two. LINE
+// doesn't allow two bots to be members of the same group chat at once, so
+// exactly one of these is ever actually sitting in the family group.
+// /switch prod|dr|dev (interactionRouter.js) moves between them.
 //
 // This module never touches LINE group membership itself — the human
 // removes/invites the bots by hand in the LINE app. All it owns is: which
@@ -4041,7 +4108,7 @@ const logger = require('../utils/logger');
 // seen in a group chat (learnGroupId) rather than requiring it to be
 // copied into .env by hand.
 const ALL_ROLES = ['dev', 'prod', 'dr'];
-const SWITCHABLE_ROLES = ['prod', 'dr'];
+const SWITCHABLE_ROLES = ['prod', 'dr', 'dev'];
 
 // Persisted the same "best-effort, existence/content is the only contract"
 // tier as quietMode.js's crash marker — a restart mid-way through a switch
@@ -4269,16 +4336,28 @@ module.exports = { start };
 
 ### 8.24 LINE Quota Warning (`src/services/quotaWatch.js`)
 
-[Phase 2, Increment 7] Each LINE bot (prod/dr) has its own monthly push quota
+[Phase 2, Increment 7] Each LINE bot (prod/dr/dev) has its own monthly push quota
 (300 on the free plan); once spent, every push fails with 429 and the bot
 can't even say so. `lineMessaging.js`'s `pushMessage()` (Section 8.7) calls
 `checkAfterPush()` fire-and-forget after every successful push — there's no
 timer, since usage only grows when something is pushed. At
-`LINE_QUOTA_WARN_AT` messages used (default 280) it pushes one warning per
-bot per month suggesting `/switch` to the other configured bot (Section
-8.22) — it never switches by itself, since the bots' group membership still
-has to be swapped by hand in the LINE app. Held back during ไปพัก; the first
-push after ไปพัก ends re-checks and delivers it.
+`LINE_QUOTA_WARN_AT` messages used (default 240) it pushes one warning per
+bot per month suggesting `/switch` to the other configured bot with the
+most quota left (Section 8.22) — it never switches by itself, since the
+bots' group membership still has to be swapped by hand in the LINE app.
+Held back during ไปพัก; the first push after ไปพัก ends re-checks and
+delivers it.
+
+**v2.7.0 changes.** On 2026-10-26 bot-dr ran out of quota with no warning.
+LINE counts a group push once per member, so with the family group's 6
+members each push costs ~6 and the old 280 default left ~3 pushes of
+headroom; and pushes landing while a check was in flight skipped their own
+check, so a burst could carry usage from below 280 to 300 unseen, after
+which the warning itself was rejected. Now: default 240; a push during an
+in-flight check sets `recheck` so one follow-up check runs; and once a
+quota is actually spent (`markExhausted`, from a rejected push or a check
+seeing usage at the limit), every reply carries a note naming the
+`/switch` target, since replies don't use quota.
 
 ```javascript
 const logger = require('../utils/logger');
@@ -4307,12 +4386,20 @@ const quietMode = require('./quietMode');
 // repeat the warning once, which is harmless.
 
 // Absolute message count, not a percentage — the free plan's 300/month is
-// what this deployment runs on, and 280 leaves room for the warning itself
-// plus a switch confirmation.
-const warnAt = () => Number(process.env.LINE_QUOTA_WARN_AT) || 280;
+// what this deployment runs on. LINE counts a group push once per member,
+// so with the family group's 6 members every push costs ~6: the old
+// default of 280 left only ~3 pushes of headroom, and a burst skipped
+// straight past it to 300 with the warning itself rejected (2026-10-26).
+// 240 leaves ~10 pushes.
+const warnAt = () => Number(process.env.LINE_QUOTA_WARN_AT) || 240;
 
 const warned = new Set();
 let checking = false;
+// Set when a push lands while a check is already in flight, so that push's
+// usage still gets checked once the current check finishes — otherwise a
+// burst's pushes are never looked at and can carry usage from below the
+// threshold to the limit unseen.
+let recheck = false;
 
 function monthKey(role) {
   const month = new Intl.DateTimeFormat('en-CA', {
@@ -4323,27 +4410,87 @@ function monthKey(role) {
   return `${role}:${month}`;
 }
 
-function buildWarning(role, used, limit) {
-  const header = `⚠️ โควต้าส่งข้อความ LINE ของ bot-${role} เดือนนี้ใกล้หมดแล้วครับ ใช้ไป ${used}/${limit}`;
+// With three switchable bots, the first configured one may itself be spent
+// this month — so recommend whichever other bot has the most quota left.
+// A bot whose quota can't be read is skipped; if none can be read, fall
+// back to the first configured one rather than recommending nothing.
+async function pickSwitchTarget(lineService, role) {
   const others = botIdentity.SWITCHABLE_ROLES.filter((r) => r !== role && botIdentity.isConfigured(r));
-  if (others.length === 0) {
+  let best = null;
+  for (const r of others) {
+    try {
+      const { quota, consumption } = await lineService.getQuota(r);
+      const remaining =
+        quota?.type === 'limited' && typeof quota.value === 'number'
+          ? quota.value - (consumption?.totalUsage ?? 0)
+          : Infinity;
+      if (!best || remaining > best.remaining) best = { role: r, remaining };
+    } catch (err) {
+      logger.error(`[QUOTA_WATCH] Quota check for bot-${r} failed:`, err);
+    }
+  }
+  if (best) return best;
+  return others.length > 0 ? { role: others[0], remaining: null } : null;
+}
+
+function buildWarning(role, used, limit, target) {
+  const header = `⚠️ โควต้าส่งข้อความ LINE ของ bot-${role} เดือนนี้ใกล้หมดแล้วครับ ใช้ไป ${used}/${limit}`;
+  if (!target || target.remaining === 0) {
     return `${header}\nถ้าหมดแล้วผมจะแจ้งเตือนไม่ได้จนถึงเดือนหน้านะครับ`;
   }
-  const target = others[0];
+  const left = Number.isFinite(target.remaining) ? ` (เหลือ ${target.remaining} ครั้ง)` : '';
   return (
     `${header}\nถ้าหมดแล้วผมจะแจ้งเตือนไม่ได้นะครับ ` +
-    `แนะนำให้พิมพ์ /switch ${target} แล้วเอา bot-${role} ออกจากกลุ่ม เชิญ bot-${target} เข้ากลุ่มแทนครับ`
+    `แนะนำให้พิมพ์ /switch ${target.role}${left} แล้วเอา bot-${role} ออกจากกลุ่ม เชิญ bot-${target.role} เข้ากลุ่มแทนครับ`
+  );
+}
+
+// Once a bot's quota is actually spent, pushes can't say so — but replies
+// are free, so lineMessaging.js's replyMessage appends a note to whatever
+// the group next asks for. Marked from a push rejected for the monthly
+// limit (lineMessaging.js) or a check that sees usage at the limit, keyed
+// by role + month like `warned` so it clears itself when the quota resets.
+// In-memory: after a restart the next failed push marks it again.
+const exhausted = new Set();
+
+function markExhausted(role) {
+  const key = monthKey(role);
+  if (exhausted.has(key)) return;
+  exhausted.add(key);
+  logger.info(`[QUOTA_WATCH] bot-${role} has used up its monthly push quota`);
+}
+
+function isExhausted(role) {
+  return exhausted.has(monthKey(role));
+}
+
+async function buildExhaustedNote(lineService, role) {
+  const header = `⚠️ โควต้าส่งข้อความ LINE ของ bot-${role} เดือนนี้หมดแล้วครับ ตอนนี้ผมส่งแจ้งเตือนเข้ากลุ่มไม่ได้ ตอบกลับได้อย่างเดียว`;
+  const target = await pickSwitchTarget(lineService, role);
+  if (!target || target.remaining === 0) {
+    return `${header}\nbot ตัวอื่นก็หมดโควต้าแล้ว จะแจ้งเตือนได้อีกทีเดือนหน้านะครับ`;
+  }
+  const left = Number.isFinite(target.remaining) ? ` (เหลือ ${target.remaining} ครั้ง)` : '';
+  return (
+    `${header}\nแนะนำให้พิมพ์ /switch ${target.role}${left} ` +
+    `แล้วเอา bot-${role} ออกจากกลุ่ม เชิญ bot-${target.role} เข้ากลุ่มแทนครับ`
   );
 }
 
 // Called (not awaited) by lineMessaging.js after each successful push.
 // `checking` stops a burst of pushes from firing overlapping checks that
-// could each send the warning; the warning's own push lands here too and
-// returns early because the month is already marked warned.
+// could each send the warning; those pushes set `recheck` instead, and one
+// follow-up check runs when the current one finishes. The warning's own
+// push lands here too and returns early because the month is already
+// marked warned.
 async function checkAfterPush(lineService) {
   const role = botIdentity.getActiveRole();
   const key = monthKey(role);
-  if (checking || warned.has(key) || quietMode.isIndefiniteQuiet()) return;
+  if (warned.has(key) || quietMode.isIndefiniteQuiet()) return;
+  if (checking) {
+    recheck = true;
+    return;
+  }
 
   checking = true;
   try {
@@ -4353,11 +4500,13 @@ async function checkAfterPush(lineService) {
 
     const used = consumption?.totalUsage ?? 0;
     logger.debug(`[QUOTA_WATCH] bot-${role}: ${used}/${quota.value}`);
+    if (used >= quota.value) markExhausted(role);
     if (used < warnAt()) return;
 
     warned.add(key);
     try {
-      await lineService.pushMessage(buildWarning(role, used, quota.value));
+      const target = await pickSwitchTarget(lineService, role);
+      await lineService.pushMessage(buildWarning(role, used, quota.value, target));
       logger.info(`[ALERT_SENT] (LINE_QUOTA_LOW) bot-${role} at ${used}/${quota.value}`);
     } catch (err) {
       // Let the next push retry the warning.
@@ -4368,10 +4517,14 @@ async function checkAfterPush(lineService) {
     logger.error('[QUOTA_WATCH] Quota check failed:', err);
   } finally {
     checking = false;
+    if (recheck) {
+      recheck = false;
+      checkAfterPush(lineService);
+    }
   }
 }
 
-module.exports = { checkAfterPush };
+module.exports = { checkAfterPush, markExhausted, isExhausted, buildExhaustedNote };
 ```
 
 ### 8.25 Battery Alert Limit (`src/services/batteryAlerts.js`)
@@ -4586,8 +4739,17 @@ Phase 1 is complete when all of the following hold:
 * A watched gateway going offline (Tuya's `online` flag turning false) produces one `DEVICE_OFFLINE` push within `DEVICE_ONLINE_CHECK_INTERVAL_SEC` of Tuya marking it, and coming back produces one `DEVICE_ONLINE` push with the downtime (`ออฟไลน์ไป 23 นาที`). Both are delivered during ไปพัก and timed เงียบๆหน่อย.
 * A watched gateway already offline at boot is announced once; an online one sets its baseline silently. A registry entry with `"watchOnline": false` is never polled.
 * A failed Tuya poll leaves the known state unchanged — no false offline alert from a REST error.
-* After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
+* After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280; 240 since v2.7.0) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
 * During ไปพัก the quota warning is held back and delivered by the first push after ไปพัก ends.
+
+### v2.7.0 (Temperature/Humidity Sensor, Third Switchable Bot, Quota Warning Fixes)
+
+* A `wsdcg` sensor's `va_temperature`/`va_humidity`/`temp_unit_convert` reports produce no LINE message — no raw `UNKNOWN_EVENT`. `battery_percentage` below `BATTERY_LOW_THRESHOLD` produces `BATTERY_LOW` under the usual battery alert limit.
+* A device registered with `"category": "climate"` appears in the menu under 🌡️ อุณหภูมิ and in รายงาน as `🌡️ 31.2°C · ชื้น 77%` (°F when `temp_unit_convert` is `f`), in `deviceRegistry.json` order.
+* `/switch dev` switches to the dev bot like `/switch prod|dr`; any other target is ignored.
+* Several pushes landing during one quota check still get checked: a burst from 234/300 at 6 per push produces exactly one warning, before the limit.
+* The warning names the other configured bot with the most quota left (`(เหลือ N ครั้ง)`), skipping one already spent; when every other bot is spent it says alerts stop until next month.
+* After a push is rejected with LINE's monthly-limit 429, every reply carries the quota-spent note naming the `/switch` target — except the `/switch` confirmation, and replies already at 5 messages. A 429 without the monthly-limit body doesn't trigger it.
 
 ### v2.6.3 (Battery Re-arm Hysteresis)
 

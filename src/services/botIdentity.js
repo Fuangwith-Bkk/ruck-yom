@@ -2,12 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 
-// Every credential set this deployment knows about. `dev` is the
-// developer's own local/testing identity, never chat-switchable. `prod`
-// and `dr` are the two real house bots — LINE doesn't allow two bots to be
-// members of the same group chat at once, so exactly one of these two is
-// ever actually sitting in the family group. /switch dr|prod
-// (interactionRouter.js) only ever toggles between these two.
+// Every credential set this deployment knows about. `prod` and `dr` are
+// the two real house bots; `dev` is the developer's own local/testing
+// identity, also switchable since 2026-10-26 as a third bot so prod can
+// rotate through three free-plan monthly push quotas instead of two. LINE
+// doesn't allow two bots to be members of the same group chat at once, so
+// exactly one of these is ever actually sitting in the family group.
+// /switch prod|dr|dev (interactionRouter.js) moves between them.
 //
 // This module never touches LINE group membership itself — the human
 // removes/invites the bots by hand in the LINE app. All it owns is: which
@@ -16,7 +17,7 @@ const logger = require('../utils/logger');
 // seen in a group chat (learnGroupId) rather than requiring it to be
 // copied into .env by hand.
 const ALL_ROLES = ['dev', 'prod', 'dr'];
-const SWITCHABLE_ROLES = ['prod', 'dr'];
+const SWITCHABLE_ROLES = ['prod', 'dr', 'dev'];
 
 // Persisted the same "best-effort, existence/content is the only contract"
 // tier as quietMode.js's crash marker — a restart mid-way through a switch

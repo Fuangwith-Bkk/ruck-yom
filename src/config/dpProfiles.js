@@ -129,6 +129,18 @@ const DP_PROFILES = {
     arm: remoteArmed,
     disarmed: remoteDisarmed,
     battery_percentage: batteryLow
+  },
+  // Temperature & Humidity Sensor — confirmed via Tuya Cloud API for
+  // อุณหภูมิความชื้น ชั้น 1 (Product Name: T&H Sensor, 2026-10-26). Readings
+  // are routine telemetry, not events: with no profile registered, every
+  // va_humidity report reached LINE as a raw UNKNOWN_EVENT and helped
+  // exhaust the monthly push quota (2026-10-26). Current values are shown
+  // by the status card instead (statusCard.js describeState 'climate').
+  wsdcg: {
+    va_temperature: ignore,
+    va_humidity: ignore,
+    temp_unit_convert: ignore,
+    battery_percentage: batteryLow
   }
 };
 

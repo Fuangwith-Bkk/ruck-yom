@@ -43,10 +43,19 @@ class LineMessagingService {
     const messages =
       typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [content];
 
-    await this._clientFor(role).pushMessage({
-      to: groupId,
-      messages
-    });
+    try {
+      await this._clientFor(role).pushMessage({
+        to: groupId,
+        messages
+      });
+    } catch (err) {
+      // 429 is also LINE's per-second rate limit; only the monthly-limit
+      // body means the quota is spent (see quotaWatch.js markExhausted).
+      if (err?.status === 429 && /monthly limit/i.test(String(err.body))) {
+        quotaWatch.markExhausted(role);
+      }
+      throw err;
+    }
 
     // Every push spends quota, so this is the one place a "nearly out"
     // warning can become due — fire-and-forget so the caller never waits on
@@ -59,8 +68,10 @@ class LineMessagingService {
   // quota isn't a silent surprise. Both are lightweight GETs against LINE's
   // own API, unrelated to Tuya. Callers decide how to handle a failure
   // (statusReport.js treats it as best-effort, same as houseMode/quietMode).
-  async getQuota() {
-    const client = this._clientFor(botIdentity.getActiveRole());
+  // `role` defaults to the active one; quotaWatch.js passes the others to
+  // pick which bot to recommend switching to.
+  async getQuota(role = botIdentity.getActiveRole()) {
+    const client = this._clientFor(role);
     const [quota, consumption] = await Promise.all([
       client.getMessageQuota(),
       client.getMessageQuotaConsumption()
@@ -82,12 +93,25 @@ class LineMessagingService {
   // /switch relies on this too: interactionRouter.js sends its confirmation
   // reply *before* calling botIdentity.setActiveRole(), so it still goes
   // out via the outgoing role, exactly matching the replyToken it's tied to.
-  async replyMessage(replyToken, messages) {
-    const client = this._clientFor(botIdentity.getActiveRole());
-    await client.replyMessage({
-      replyToken,
-      messages: Array.isArray(messages) ? messages : [messages]
-    });
+  //
+  // While the active bot's push quota is spent, every reply also carries a
+  // note saying so (quotaWatch.js) — replies are free, so this is the only
+  // way the group can still find out. Skipped when `quotaNote: false` (the
+  // /switch confirmation, which is already the fix) or when the reply is
+  // already at LINE's 5-messages-per-reply cap. Building the note is
+  // best-effort: a failure sends the reply without it.
+  async replyMessage(replyToken, messages, { quotaNote = true } = {}) {
+    const role = botIdentity.getActiveRole();
+    const client = this._clientFor(role);
+    let list = Array.isArray(messages) ? messages : [messages];
+    if (quotaNote && quotaWatch.isExhausted(role) && list.length < 5) {
+      try {
+        list = [...list, { type: 'text', text: await quotaWatch.buildExhaustedNote(this, role) }];
+      } catch (err) {
+        // Reply without the note rather than not at all.
+      }
+    }
+    await client.replyMessage({ replyToken, messages: list });
   }
 }
 

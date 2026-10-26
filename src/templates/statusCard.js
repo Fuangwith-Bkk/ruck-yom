@@ -34,6 +34,13 @@ function describeState(category, dpMap) {
       const isLeak = dpMap.watersensor_state === 'alarm' || dpMap.watersensor_state === true;
       return { stateText: isLeak ? 'ตรวจพบน้ำรั่ว!' : 'ปกติ', stateEmoji: isLeak ? '💧' : '✅' };
     }
+    case 'climate': {
+      // wsdcg reports va_temperature in tenths of a degree (312 = 31.2).
+      const temp = typeof dpMap.va_temperature === 'number' ? (dpMap.va_temperature / 10).toFixed(1) : '-';
+      const unit = dpMap.temp_unit_convert === 'f' ? '°F' : '°C';
+      const humidity = typeof dpMap.va_humidity === 'number' ? `${dpMap.va_humidity}%` : '-';
+      return { stateText: `${temp}${unit} · ชื้น ${humidity}`, stateEmoji: '🌡️' };
+    }
     case 'motion':
     default:
       return { stateText: 'พร้อมใช้งาน', stateEmoji: '🏃' };

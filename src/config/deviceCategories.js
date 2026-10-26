@@ -60,6 +60,13 @@ const DEVICE_CATEGORIES = {
     controllable: true,
     actions: ['toggle']
   },
+  climate: {
+    label: 'อุณหภูมิ',
+    emoji: '🌡️',
+    inMenu: true,
+    queryable: true,
+    controllable: false
+  },
   remote: {
     label: 'รีโมท',
     emoji: '📱',
