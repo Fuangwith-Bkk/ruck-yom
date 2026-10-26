@@ -3,6 +3,11 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.7.2] - 2026-10-26
+
+### Security
+- **Dependency updates (`npm audit`: 1 critical, 1 high, 1 moderate → 0)** — Express's own dependencies, lockfile only, no code changes: `proxy-addr` 2.0.7 → 2.0.8 (GHSA-jqcg-44mw-7w3h, IP spoofing via an IPv4-mapped IPv6 `trust proxy` subnet), `body-parser` 2.3.0 → 2.4.0 (GHSA-27r3-jxmh-p828, DoS via trailing bytes after a compressed body), `qs` 6.15.3 → 6.16.1 (GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g). None was reachable in practice: `trust proxy` isn't set, no body parser runs (`/webhook` reads the raw body itself), and nothing reads `req.query`.
+
 ## [2.7.1] - 2026-10-26
 
 ### Fixed

@@ -4885,6 +4885,11 @@ Phase 1 is complete when all of the following hold:
 * After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280; 240 since v2.7.0) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
 * During ไปพัก the quota warning is held back and delivered by the first push after ไปพัก ends.
 
+### v2.7.2 (Dependency Security Updates)
+
+* `npm audit` reports 0 vulnerabilities (`proxy-addr` ≥ 2.0.8, `body-parser` ≥ 2.4.0, `qs` ≥ 6.16.1).
+* Behaviour is unchanged: a request with a bad signature still gets 401, and รายงาน replies as before.
+
 ### v2.7.1 (Inactive-Bot Events, Quota Note from รายงาน)
 
 * A webhook request validly signed by a configured bot that isn't active gets 200 (LINE's Verify passes) and never reaches the normal event handler; a request signed by no configured bot still gets 401.
