@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow [SemVer](https://semver.org/).
 
+## [2.7.1] - 2026-10-26
+
+### Fixed
+- **Switching stuck when the new bot was invited first** — on 2026-10-26 รักยม - Dev was added to the family group (15:30) before the server had switched to it, and รักยม - DR had already been removed. The webhook only accepted the active bot's signature, so both `/switch dev` messages (15:31, 15:55) were rejected as 401 and nothing could reach the server until DR was put back. A request validly signed by any configured bot is now accepted (200, so the LINE console's Verify passes too); from a bot that isn't active, `/switch <that bot>` makes it active, its `join` replies with how to activate it, and its group's groupId is learned. Ordinary chat through it is ignored (logged, no reply). A request signed by no configured bot is still 401.
+- **No quota note on รายงาน showing 300/300** — the note only turned on after a push failed, so a รายงาน right after a restart showed the spent quota without it. A report that reads usage at the limit now marks the quota spent, and the same reply carries the note.
+
+### Changed
+- `webhook/server.js` reads the raw request body itself (still never decompressed) so other bots' secrets can be tried after a signature failure. `lineMessaging.replyMessage()` takes an optional `role` for replying through a bot that isn't active.
+- After a switch, the old bot's `leave` event is logged as `[WEBHOOK] Ignored leave event from bot-…` instead of `Signature validation failed`.
+
 ## [2.7.0] - 2026-10-26
 
 ### Added

@@ -1,6 +1,8 @@
 const tuyaRestClient = require('./tuyaRestClient');
 const houseMode = require('./houseMode');
 const quietMode = require('./quietMode');
+const botIdentity = require('./botIdentity');
+const quotaWatch = require('./quotaWatch');
 const { queryableDevices } = require('../templates/menuBuilders');
 const { buildAllStatusTable } = require('../templates/statusCard');
 const logger = require('../utils/logger');
@@ -34,6 +36,17 @@ async function buildReport(lineService) {
     logger.error(`[STATUS_REPORT] Status query failed for ${device.id}:`, outcome.reason);
     return { device, error: true };
   });
+
+  // A report showing the quota already spent is as good a signal as a
+  // rejected push — mark it, so the reply carrying this very report also
+  // carries the quota-spent note (lineMessaging.js replyMessage). Before
+  // this, a รายงาน right after a restart showed 300/300 with no note,
+  // because no push had failed yet (2026-10-26).
+  const quota = quotaResult?.quota;
+  const used = quotaResult?.consumption?.totalUsage;
+  if (quota?.type === 'limited' && typeof quota.value === 'number' && used >= quota.value) {
+    quotaWatch.markExhausted(botIdentity.getActiveRole());
+  }
 
   const modeInfo = {
     armMode: houseMode.getMode(),

@@ -99,9 +99,11 @@ class LineMessagingService {
   // way the group can still find out. Skipped when `quotaNote: false` (the
   // /switch confirmation, which is already the fix) or when the reply is
   // already at LINE's 5-messages-per-reply cap. Building the note is
-  // best-effort: a failure sends the reply without it.
-  async replyMessage(replyToken, messages, { quotaNote = true } = {}) {
-    const role = botIdentity.getActiveRole();
+  // best-effort: a failure sends the reply without it. `role` overrides the
+  // active role for the one case where the replyToken belongs to another
+  // bot — a `join` from an inactive bot (interactionRouter.js
+  // handleInactiveRoleEvents).
+  async replyMessage(replyToken, messages, { quotaNote = true, role = botIdentity.getActiveRole() } = {}) {
     const client = this._clientFor(role);
     let list = Array.isArray(messages) ? messages : [messages];
     if (quotaNote && quotaWatch.isExhausted(role) && list.length < 5) {

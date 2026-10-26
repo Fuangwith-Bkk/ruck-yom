@@ -835,9 +835,11 @@ class LineMessagingService {
   // way the group can still find out. Skipped when `quotaNote: false` (the
   // /switch confirmation, which is already the fix) or when the reply is
   // already at LINE's 5-messages-per-reply cap. Building the note is
-  // best-effort: a failure sends the reply without it.
-  async replyMessage(replyToken, messages, { quotaNote = true } = {}) {
-    const role = botIdentity.getActiveRole();
+  // best-effort: a failure sends the reply without it. `role` overrides the
+  // active role for the one case where the replyToken belongs to another
+  // bot — a `join` from an inactive bot (interactionRouter.js
+  // handleInactiveRoleEvents).
+  async replyMessage(replyToken, messages, { quotaNote = true, role = botIdentity.getActiveRole() } = {}) {
     const client = this._clientFor(role);
     let list = Array.isArray(messages) ? messages : [messages];
     if (quotaNote && quotaWatch.isExhausted(role) && list.length < 5) {
@@ -2967,6 +2969,57 @@ class InteractionRouter {
     );
   }
 
+  // Events from a configured bot that isn't the active one (server.js
+  // accepted them because they're validly signed by that bot's channel).
+  // Only three things happen: its groupId is learned, so it can push the
+  // moment it becomes active; `/switch <that bot>` sent through it makes it
+  // active — the way out when it was invited before the switch and the
+  // active bot is already gone from the group; and on `join` it replies
+  // with how to activate it. Everything else (ordinary chat in the group)
+  // is ignored and only logged — replying to it would answer every
+  // message the family sends.
+  async handleInactiveRoleEvents(role, events) {
+    for (const event of events) {
+      try {
+        if (event.source && event.source.type === 'group') {
+          botIdentity.learnGroupId(role, event.source.groupId);
+        }
+
+        const active = botIdentity.getActiveRole();
+        const text = event.type === 'message' && event.message.type === 'text' ? event.message.text.trim() : null;
+        const switchMatch = text && text.match(SWITCH_COMMAND_RE);
+
+        if (switchMatch && switchMatch[1] === role && role !== active) {
+          botIdentity.setActiveRole(role);
+          // Sent after the switch, unlike _switchRole: this replyToken
+          // belongs to bot-<role>, which is only now the active one.
+          await this.lineService.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `สลับไปใช้ bot-${role} แล้วครับ ถ้า bot-${active} ยังอยู่ในกลุ่มนี้ เอาออกได้เลยครับ`
+          }, { quotaNote: false });
+          continue;
+        }
+
+        if (event.type === 'join') {
+          await this.lineService.replyMessage(event.replyToken, {
+            type: 'text',
+            text:
+              `ตอนนี้ระบบยังใช้งาน bot-${active} อยู่ครับ ` +
+              `พิมพ์ /switch ${role} ในกลุ่มนี้เพื่อเปลี่ยนมาใช้ bot-${role} แทนครับ`
+          }, { quotaNote: false, role });
+          continue;
+        }
+
+        logger.info(
+          `[WEBHOOK] Ignored ${event.type} event from bot-${role} — bot-${active} is active. ` +
+          `Send "/switch ${role}" in the group to make bot-${role} active.`
+        );
+      } catch (err) {
+        logger.error(`[INTERACTION_ROUTER] Error handling event from inactive bot-${role}:`, err);
+      }
+    }
+  }
+
   async _handleEvent(event) {
     // Learn the active role's groupId from *any* event sourced from a
     // group — deliberately not restricted to message/postback, since the
@@ -3416,9 +3469,23 @@ bots to be members of the same group chat at once — whichever role is
 currently active is, by construction, the only one whose signature could
 ever legitimately validate.
 
+**v2.7.1 addition.** On 2026-10-26 bot-dev was invited into the family group
+before the server had switched to it; with bot-dr already removed, every
+`/switch dev` sent through bot-dev was rejected as 401 and nothing in the
+group could reach the server. `verifySignature` now reads the raw body
+itself (`readRawBody`, handed to the SDK middleware as `req.rawBody`) so
+that, on a `SignatureValidationFailed`, the error handler can try the other
+configured roles' secrets (`inactiveSigningRole`). A request validly signed
+by one of them gets 200 (so LINE's Verify passes for every configured bot)
+and its events go to `interactionRouter.handleInactiveRoleEvents` (Section
+8.14) instead of the normal handler; anything else is still 401. The body is
+still never decompressed — not `express.raw()`/`express.json()`, which
+inflate Content-Encoding bodies (including Brotli, CVE-2026-111497) before
+the signature check.
+
 ```javascript
 const express = require('express');
-const { middleware, SignatureValidationFailed } = require('@line/bot-sdk');
+const { middleware, validateSignature, SignatureValidationFailed } = require('@line/bot-sdk');
 const LineMessagingService = require('../services/lineMessaging');
 const InteractionRouter = require('../services/interactionRouter');
 const botIdentity = require('../services/botIdentity');
@@ -3428,6 +3495,39 @@ const logger = require('../utils/logger');
 // incoming LINE webhook events (trigger keyword / argument-less command, or
 // a tap on a previously-sent Quick Reply/postback). See
 // RUCKYOM_SPECIFICATION.md Section 2 and src/services/interactionRouter.js.
+
+// Read the body as raw bytes, the same way @line/bot-sdk's middleware does
+// when nothing parsed it first, and hand it over as req.rawBody (which the
+// middleware prefers) — so the bytes are still available afterwards to try
+// the other roles' secrets on a signature failure. Deliberately not
+// express.raw()/express.json(): those decompress Content-Encoding bodies,
+// including Brotli (CVE-2026-111497), before the signature is checked.
+async function readRawBody(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// The role (other than the active one) whose channel secret validates this
+// request's signature, or null. A configured bot that isn't active is still
+// one of ours — e.g. bot-dev invited into the group before /switch dev ran
+// on the server (2026-10-26), whose `/switch dev` was then rejected as 401
+// with the active bot already removed from the group.
+function inactiveSigningRole(req) {
+  const signature = req.headers['x-line-signature'];
+  if (!signature || !Buffer.isBuffer(req.rawBody)) return null;
+  const active = botIdentity.getActiveRole();
+  return (
+    botIdentity.SWITCHABLE_ROLES.find((role) => {
+      if (role === active) return false;
+      const { channelSecret } = botIdentity.getCredentials(role);
+      return Boolean(channelSecret) && validateSignature(req.rawBody, channelSecret, signature);
+    }) || null
+  );
+}
+
 function createWebhookServer() {
   const app = express();
   const lineService = new LineMessagingService();
@@ -3437,11 +3537,17 @@ function createWebhookServer() {
   // role's channel secret (botIdentity.js) and parses the JSON body — a
   // request that fails signature verification never reaches the route
   // handler at all. Resolved fresh per request (not built once at server
-  // startup) so /switch prod|dr|dev takes effect immediately: only one bot is
-  // ever actually a member of the group at a time (LINE doesn't allow two),
-  // so whichever role is active is always the only one whose signature can
-  // legitimately validate anyway.
-  const verifySignature = (req, res, next) => {
+  // startup) so /switch prod|dr|dev takes effect immediately. Only the
+  // active role's events reach the route handler; one validly signed by
+  // another configured bot (e.g. invited before /switch ran) is diverted
+  // in the error handler below to handleInactiveRoleEvents instead.
+  const verifySignature = async (req, res, next) => {
+    try {
+      req.rawBody = await readRawBody(req);
+    } catch (err) {
+      next(err);
+      return;
+    }
     const role = botIdentity.getActiveRole();
     const { channelSecret } = botIdentity.getCredentials(role);
     if (!channelSecret) {
@@ -3471,6 +3577,24 @@ function createWebhookServer() {
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (err instanceof SignatureValidationFailed) {
+      // Signed by one of our other bots: accept it (200, so LINE's Verify
+      // passes too) and let the router handle the few things an inactive
+      // bot's events may do — see handleInactiveRoleEvents.
+      const otherRole = inactiveSigningRole(req);
+      if (otherRole) {
+        res.status(200).end();
+        let body;
+        try {
+          body = JSON.parse(req.rawBody.toString());
+        } catch (parseErr) {
+          logger.error(`[WEBHOOK] Unparseable body from bot-${otherRole}:`, parseErr);
+          return;
+        }
+        router
+          .handleInactiveRoleEvents(otherRole, body.events || [])
+          .catch((handleErr) => logger.error('[WEBHOOK] Unhandled error processing inactive-bot events:', handleErr));
+        return;
+      }
       logger.error('[WEBHOOK] Signature validation failed:', err.message);
       res.status(401).end();
       return;
@@ -3828,10 +3952,18 @@ with the device queries and is treated as best-effort, same tier as
 houseMode/quietMode: a failed quota lookup just omits that section
 (`buildQuotaSection`, Section 8.12) rather than failing the whole report.
 
+**v2.7.1 addition.** A report that reads usage at or above the limit marks
+the active role's quota as spent (`quotaWatch.markExhausted`, Section 8.24),
+so the reply carrying it also carries the quota-spent note — before, a
+รายงาน right after a restart showed 300/300 without it, since no push had
+failed yet.
+
 ```javascript
 const tuyaRestClient = require('./tuyaRestClient');
 const houseMode = require('./houseMode');
 const quietMode = require('./quietMode');
+const botIdentity = require('./botIdentity');
+const quotaWatch = require('./quotaWatch');
 const { queryableDevices } = require('../templates/menuBuilders');
 const { buildAllStatusTable } = require('../templates/statusCard');
 const logger = require('../utils/logger');
@@ -3865,6 +3997,17 @@ async function buildReport(lineService) {
     logger.error(`[STATUS_REPORT] Status query failed for ${device.id}:`, outcome.reason);
     return { device, error: true };
   });
+
+  // A report showing the quota already spent is as good a signal as a
+  // rejected push — mark it, so the reply carrying this very report also
+  // carries the quota-spent note (lineMessaging.js replyMessage). Before
+  // this, a รายงาน right after a restart showed 300/300 with no note,
+  // because no push had failed yet (2026-10-26).
+  const quota = quotaResult?.quota;
+  const used = quotaResult?.consumption?.totalUsage;
+  if (quota?.type === 'limited' && typeof quota.value === 'number' && used >= quota.value) {
+    quotaWatch.markExhausted(botIdentity.getActiveRole());
+  }
 
   const modeInfo = {
     armMode: houseMode.getMode(),
@@ -4741,6 +4884,14 @@ Phase 1 is complete when all of the following hold:
 * A failed Tuya poll leaves the known state unchanged — no false offline alert from a REST error.
 * After a push that brings the active bot to `LINE_QUOTA_WARN_AT` (default 280; 240 since v2.7.0) or more, exactly one warning is sent for that bot that month, naming the `/switch` target — even when several pushes land at once. No quota check runs without a push; replies don't trigger one.
 * During ไปพัก the quota warning is held back and delivered by the first push after ไปพัก ends.
+
+### v2.7.1 (Inactive-Bot Events, Quota Note from รายงาน)
+
+* A webhook request validly signed by a configured bot that isn't active gets 200 (LINE's Verify passes) and never reaches the normal event handler; a request signed by no configured bot still gets 401.
+* That bot's group events teach it the group's groupId. Its `join` gets one reply, sent through that bot: `ตอนนี้ระบบยังใช้งาน bot-<active> อยู่ครับ พิมพ์ /switch <role> ในกลุ่มนี้…`.
+* `/switch <role>` sent through that same bot makes it active and replies `สลับไปใช้ bot-<role> แล้วครับ ถ้า bot-<old> ยังอยู่ในกลุ่มนี้ เอาออกได้เลยครับ`. `/switch` to any other role through it, and ordinary group chat, get no reply and are only logged (`[WEBHOOK] Ignored … event from bot-<role>`).
+* After a switch, the previous bot's `leave` is logged as ignored rather than as a signature failure.
+* A รายงาน that shows usage at the limit carries the quota-spent note in the same reply.
 
 ### v2.7.0 (Temperature/Humidity Sensor, Third Switchable Bot, Quota Warning Fixes)
 

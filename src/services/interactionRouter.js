@@ -82,6 +82,57 @@ class InteractionRouter {
     );
   }
 
+  // Events from a configured bot that isn't the active one (server.js
+  // accepted them because they're validly signed by that bot's channel).
+  // Only three things happen: its groupId is learned, so it can push the
+  // moment it becomes active; `/switch <that bot>` sent through it makes it
+  // active — the way out when it was invited before the switch and the
+  // active bot is already gone from the group; and on `join` it replies
+  // with how to activate it. Everything else (ordinary chat in the group)
+  // is ignored and only logged — replying to it would answer every
+  // message the family sends.
+  async handleInactiveRoleEvents(role, events) {
+    for (const event of events) {
+      try {
+        if (event.source && event.source.type === 'group') {
+          botIdentity.learnGroupId(role, event.source.groupId);
+        }
+
+        const active = botIdentity.getActiveRole();
+        const text = event.type === 'message' && event.message.type === 'text' ? event.message.text.trim() : null;
+        const switchMatch = text && text.match(SWITCH_COMMAND_RE);
+
+        if (switchMatch && switchMatch[1] === role && role !== active) {
+          botIdentity.setActiveRole(role);
+          // Sent after the switch, unlike _switchRole: this replyToken
+          // belongs to bot-<role>, which is only now the active one.
+          await this.lineService.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `สลับไปใช้ bot-${role} แล้วครับ ถ้า bot-${active} ยังอยู่ในกลุ่มนี้ เอาออกได้เลยครับ`
+          }, { quotaNote: false });
+          continue;
+        }
+
+        if (event.type === 'join') {
+          await this.lineService.replyMessage(event.replyToken, {
+            type: 'text',
+            text:
+              `ตอนนี้ระบบยังใช้งาน bot-${active} อยู่ครับ ` +
+              `พิมพ์ /switch ${role} ในกลุ่มนี้เพื่อเปลี่ยนมาใช้ bot-${role} แทนครับ`
+          }, { quotaNote: false, role });
+          continue;
+        }
+
+        logger.info(
+          `[WEBHOOK] Ignored ${event.type} event from bot-${role} — bot-${active} is active. ` +
+          `Send "/switch ${role}" in the group to make bot-${role} active.`
+        );
+      } catch (err) {
+        logger.error(`[INTERACTION_ROUTER] Error handling event from inactive bot-${role}:`, err);
+      }
+    }
+  }
+
   async _handleEvent(event) {
     // Learn the active role's groupId from *any* event sourced from a
     // group — deliberately not restricted to message/postback, since the
